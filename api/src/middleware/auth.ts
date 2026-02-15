@@ -10,9 +10,16 @@ interface AuthEnv {
   SUPABASE_URL: string;
 }
 
+interface AuthVariables {
+  userId: string;
+}
+
 let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
-export const authMiddleware = (): MiddlewareHandler<{ Bindings: AuthEnv }> => {
+export const authMiddleware = (): MiddlewareHandler<{
+  Bindings: AuthEnv;
+  Variables: AuthVariables;
+}> => {
   return async (c, next) => {
     const authHeader = c.req.header('Authorization');
 
