@@ -3,10 +3,8 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-[vars]
-ALLOWED_ORIGIN = "http://localhost:5173"
-
 # Production overrides set via:
 # wrangler secret put SUPABASE_URL
 # wrangler secret put SUPABASE_ANON_KEY
 # wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+# wrangler secret put ALLOWED_ORIGIN
