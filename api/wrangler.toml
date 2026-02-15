@@ -8,3 +8,7 @@ compatibility_flags = ["nodejs_compat"]
 # wrangler secret put SUPABASE_ANON_KEY
 # wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 # wrangler secret put ALLOWED_ORIGIN
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "buildpractical-artifacts"

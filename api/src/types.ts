@@ -8,6 +8,7 @@ export interface Bindings {
   SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   ALLOWED_ORIGIN: string;
+  ARTIFACTS: R2Bucket;
 }
 
 export interface Variables {

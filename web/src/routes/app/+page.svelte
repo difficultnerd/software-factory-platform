@@ -28,6 +28,7 @@
       plan_generating: 'Generating plan',
       plan_ready: 'Plan ready',
       plan_approved: 'Plan approved',
+      code_generating: 'Generating code',
       failed: 'Failed',
       done: 'Done',
     };

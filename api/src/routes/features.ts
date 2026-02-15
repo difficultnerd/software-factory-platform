@@ -13,6 +13,8 @@ import { runAgent } from '../lib/agents/runner.js';
 import { callCompletion } from '../lib/anthropic.js';
 import { getSpecSystemPrompt, getSpecUserPrompt } from '../lib/agents/spec-prompt.js';
 import { getPlanSystemPrompt, getPlanUserPrompt } from '../lib/agents/plan-prompt.js';
+import { getCodeSystemPrompt, getCodeUserPrompt } from '../lib/agents/code-prompt.js';
+import { zipSync, strToU8 } from 'fflate';
 
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -273,7 +275,7 @@ features.post('/:id/approve-spec', async (c) => {
   return c.json({ success: true });
 });
 
-// Approve plan
+// Approve plan and trigger code generation
 features.post('/:id/approve-plan', async (c) => {
   const userId = c.get('userId');
   const featureId = c.req.param('id');
@@ -287,7 +289,7 @@ features.post('/:id/approve-plan', async (c) => {
 
   const { data: feature, error: fetchError } = await authClient
     .from('features')
-    .select('id, status')
+    .select('id, status, spec_markdown, plan_markdown')
     .eq('id', featureId)
     .single();
 
@@ -295,7 +297,7 @@ features.post('/:id/approve-plan', async (c) => {
     return c.json({ error: 'Feature not found' }, 404);
   }
 
-  const f = feature as { id: string; status: string };
+  const f = feature as { id: string; status: string; spec_markdown: string | null; plan_markdown: string | null };
 
   if (f.status !== 'plan_ready') {
     return c.json({ error: 'Feature plan is not ready for approval' }, 409);
@@ -304,7 +306,7 @@ features.post('/:id/approve-plan', async (c) => {
   const serviceClient = createServiceClient(c.env);
   const { error: updateError } = await serviceClient
     .from('features')
-    .update({ status: 'plan_approved' })
+    .update({ status: 'code_generating' })
     .eq('id', featureId);
 
   if (updateError) {
@@ -324,7 +326,85 @@ features.post('/:id/approve-plan', async (c) => {
     metadata: { featureId },
   });
 
+  // Run code agent inline
+  await runCodeAgent(c.env, userId, featureId, f.spec_markdown ?? '', f.plan_markdown ?? '');
+
   return c.json({ success: true });
+});
+
+// Download generated code as zip
+features.get('/:id/download', async (c) => {
+  const userId = c.get('userId');
+  const featureId = c.req.param('id');
+
+  if (!uuidRegex.test(featureId)) {
+    return c.json({ error: 'Invalid feature ID' }, 400);
+  }
+
+  const accessToken = c.req.header('Authorization')!.slice(7);
+  const authClient = createAuthenticatedClient(c.env, accessToken);
+
+  // Verify ownership and status
+  const { data: feature, error: fetchError } = await authClient
+    .from('features')
+    .select('id, title, status')
+    .eq('id', featureId)
+    .single();
+
+  if (fetchError || !feature) {
+    return c.json({ error: 'Feature not found' }, 404);
+  }
+
+  const f = feature as { id: string; title: string; status: string };
+
+  if (f.status !== 'done') {
+    return c.json({ error: 'Code generation is not complete' }, 409);
+  }
+
+  // Fetch artifacts list
+  const serviceClient = createServiceClient(c.env);
+  const { data: artifacts, error: artifactsError } = await serviceClient
+    .from('artifacts')
+    .select('file_path, r2_key')
+    .eq('feature_id', featureId)
+    .eq('user_id', userId);
+
+  if (artifactsError || !artifacts || artifacts.length === 0) {
+    return c.json({ error: 'No artifacts found for this feature' }, 404);
+  }
+
+  const typedArtifacts = artifacts as Array<{ file_path: string; r2_key: string }>;
+
+  // Build zip from R2 objects
+  const zipData: Record<string, Uint8Array> = {};
+
+  for (const artifact of typedArtifacts) {
+    const r2Object = await c.env.ARTIFACTS.get(artifact.r2_key);
+    if (r2Object) {
+      const content = await r2Object.text();
+      zipData[artifact.file_path] = strToU8(content);
+    }
+  }
+
+  if (Object.keys(zipData).length === 0) {
+    return c.json({ error: 'No files could be retrieved' }, 500);
+  }
+
+  const zipped = zipSync(zipData);
+
+  // Sanitise title for filename
+  const safeName = f.title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 50) || 'feature';
+
+  return new Response(zipped, {
+    headers: {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${safeName}.zip"`,
+    },
+  });
 });
 
 // Background task: run spec agent
@@ -417,6 +497,119 @@ async function runSpecAgent(
       await serviceClient
         .from('features')
         .update({ status: 'failed', error_message: `Spec agent error: ${message}` })
+        .eq('id', featureId);
+    } catch { /* last resort — nothing more we can do */ }
+  }
+}
+
+// Background task: run code agent
+async function runCodeAgent(
+  env: AppEnv['Bindings'],
+  userId: string,
+  featureId: string,
+  specMarkdown: string,
+  planMarkdown: string,
+): Promise<void> {
+  const serviceClient = createServiceClient(env);
+
+  try {
+    // Read API key from Vault
+    const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
+      'read_user_secret',
+      { p_user_id: userId, p_name: 'anthropic_key' },
+    );
+
+    if (vaultError || !apiKeyData) {
+      logger.error({
+        event: 'agent.implementer.vault_read',
+        actor: userId,
+        outcome: 'failure',
+        metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
+      });
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
+        .eq('id', featureId);
+      return;
+    }
+
+    const apiKey = String(apiKeyData);
+
+    const result = await runAgent({
+      agentName: 'implementer',
+      featureId,
+      userId,
+      apiKey,
+      systemPrompt: getCodeSystemPrompt(),
+      userPrompt: getCodeUserPrompt(specMarkdown, planMarkdown),
+      env,
+      maxTokens: 16384,
+    });
+
+    if (result.ok) {
+      // Parse JSON output into file array
+      let files: Array<{ path: string; content: string }>;
+      try {
+        // Strip markdown fences if the model wrapped the output
+        let jsonText = result.text.trim();
+        if (jsonText.startsWith('```')) {
+          jsonText = jsonText.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+        }
+        files = JSON.parse(jsonText) as Array<{ path: string; content: string }>;
+        if (!Array.isArray(files) || files.length === 0) {
+          throw new Error('Expected a non-empty array of file objects');
+        }
+      } catch (parseErr) {
+        const message = parseErr instanceof Error ? parseErr.message : 'Failed to parse code output';
+        logger.error({
+          event: 'agent.implementer.parse',
+          actor: userId,
+          outcome: 'failure',
+          metadata: { featureId, error: message },
+        });
+        await serviceClient
+          .from('features')
+          .update({ status: 'failed', error_message: `Code generation produced invalid output: ${message}` })
+          .eq('id', featureId);
+        return;
+      }
+
+      // Upload each file to R2 and record in artifacts table
+      for (const file of files) {
+        const r2Key = `${userId}/${featureId}/${file.path}`;
+        await env.ARTIFACTS.put(r2Key, file.content);
+
+        await serviceClient.from('artifacts').insert({
+          feature_id: featureId,
+          user_id: userId,
+          file_path: file.path,
+          r2_key: r2Key,
+          size_bytes: new TextEncoder().encode(file.content).byteLength,
+        });
+      }
+
+      await serviceClient
+        .from('features')
+        .update({ status: 'done' })
+        .eq('id', featureId);
+    } else {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: result.error })
+        .eq('id', featureId);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error in code agent';
+    logger.error({
+      event: 'agent.implementer.crash',
+      actor: userId,
+      outcome: 'failure',
+      metadata: { featureId, error: message },
+    });
+    try {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: `Code agent error: ${message}` })
         .eq('id', featureId);
     } catch { /* last resort — nothing more we can do */ }
   }

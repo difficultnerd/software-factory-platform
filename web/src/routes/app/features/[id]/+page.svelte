@@ -2,6 +2,8 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { apiFetch } from '$lib/api';
+  import { PUBLIC_API_URL } from '$env/static/public';
+  import { marked } from 'marked';
 
   let { data } = $props();
 
@@ -22,7 +24,15 @@
   let error = $state('');
   let approving = $state(false);
   let deletingFeature = $state(false);
+  let downloading = $state(false);
   let pollTimer: ReturnType<typeof setInterval> | null = $state(null);
+
+  // Configure marked for safe defaults
+  marked.setOptions({ breaks: true, gfm: true });
+
+  function renderMarkdown(content: string): string {
+    return marked.parse(content) as string;
+  }
 
   function getToken(): string {
     return data.session?.access_token ?? '';
@@ -37,6 +47,7 @@
       plan_generating: 'Generating plan',
       plan_ready: 'Plan ready',
       plan_approved: 'Plan approved',
+      code_generating: 'Generating code',
       failed: 'Failed',
       done: 'Done',
     };
@@ -45,7 +56,7 @@
 
   function statusClasses(status: string): string {
     if (status === 'failed') return 'bg-red-100 text-red-700';
-    if (status === 'done' || status === 'plan_approved') return 'bg-green-100 text-green-700';
+    if (status === 'done') return 'bg-green-100 text-green-700';
     if (status.endsWith('_generating')) return 'bg-amber-100 text-amber-700';
     if (status.endsWith('_ready')) return 'bg-blue-100 text-blue-700';
     if (status.endsWith('_approved')) return 'bg-green-100 text-green-700';
@@ -136,6 +147,41 @@
       await loadFeature();
     }
     approving = false;
+  }
+
+  async function downloadCode() {
+    if (!feature) return;
+    downloading = true;
+    error = '';
+
+    try {
+      const res = await fetch(`${PUBLIC_API_URL}/api/features/${feature.id}/download`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+
+      if (!res.ok) {
+        const body = await res.json() as { error?: string };
+        error = body.error ?? 'Download failed';
+        downloading = false;
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      // Extract filename from Content-Disposition or fall back
+      const disposition = res.headers.get('Content-Disposition');
+      const match = disposition?.match(/filename="(.+)"/);
+      a.download = match?.[1] ?? 'feature.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      error = 'Network error during download. Please try again.';
+    }
+    downloading = false;
   }
 
   async function deleteFeature() {
@@ -240,8 +286,8 @@
         </div>
 
         <div class="bg-white rounded-xl border border-slate-200 p-6">
-          <div class="prose prose-sm prose-slate max-w-none whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-            {feature.specMarkdown}
+          <div class="prose prose-sm prose-slate max-w-none">
+            {@html renderMarkdown(feature.specMarkdown ?? '')}
           </div>
         </div>
 
@@ -270,8 +316,8 @@
               View specification
             </summary>
             <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-                {feature.specMarkdown}
+              <div class="prose prose-sm prose-slate max-w-none">
+                {@html renderMarkdown(feature.specMarkdown)}
               </div>
             </div>
           </details>
@@ -297,8 +343,8 @@
               View specification
             </summary>
             <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-                {feature.specMarkdown}
+              <div class="prose prose-sm prose-slate max-w-none">
+                {@html renderMarkdown(feature.specMarkdown)}
               </div>
             </div>
           </details>
@@ -306,12 +352,12 @@
 
         <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <p class="text-sm text-blue-800 font-medium">Implementation plan ready for review</p>
-          <p class="mt-1 text-sm text-blue-700">Review the plan below, then approve to proceed.</p>
+          <p class="mt-1 text-sm text-blue-700">Review the plan below, then approve to begin code generation.</p>
         </div>
 
         <div class="bg-white rounded-xl border border-slate-200 p-6">
-          <div class="prose prose-sm prose-slate max-w-none whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-            {feature.planMarkdown}
+          <div class="prose prose-sm prose-slate max-w-none">
+            {@html renderMarkdown(feature.planMarkdown ?? '')}
           </div>
         </div>
 
@@ -321,12 +367,12 @@
             disabled={approving}
             class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {approving ? 'Approving...' : 'Approve plan'}
+            {approving ? 'Generating code...' : 'Approve plan'}
           </button>
         </div>
       </div>
 
-    {:else if feature.status === 'plan_approved'}
+    {:else if feature.status === 'plan_approved' || feature.status === 'code_generating'}
       <div class="space-y-4">
         {#if feature.specMarkdown}
           <details class="bg-white rounded-xl border border-slate-200">
@@ -334,8 +380,8 @@
               View specification
             </summary>
             <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-                {feature.specMarkdown}
+              <div class="prose prose-sm prose-slate max-w-none">
+                {@html renderMarkdown(feature.specMarkdown)}
               </div>
             </div>
           </details>
@@ -347,24 +393,76 @@
               View implementation plan
             </summary>
             <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-                {feature.planMarkdown}
+              <div class="prose prose-sm prose-slate max-w-none">
+                {@html renderMarkdown(feature.planMarkdown)}
+              </div>
+            </div>
+          </details>
+        {/if}
+
+        <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
+          <div class="inline-flex items-center gap-3 text-amber-700">
+            <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p class="text-sm font-medium">Generating code...</p>
+          </div>
+          <p class="mt-3 text-xs text-slate-400">This usually takes 60-90 seconds.</p>
+        </div>
+      </div>
+
+    {:else if feature.status === 'done'}
+      <div class="space-y-4">
+        {#if feature.specMarkdown}
+          <details class="bg-white rounded-xl border border-slate-200">
+            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+              View specification
+            </summary>
+            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+              <div class="prose prose-sm prose-slate max-w-none">
+                {@html renderMarkdown(feature.specMarkdown)}
+              </div>
+            </div>
+          </details>
+        {/if}
+
+        {#if feature.planMarkdown}
+          <details class="bg-white rounded-xl border border-slate-200">
+            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+              View implementation plan
+            </summary>
+            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+              <div class="prose prose-sm prose-slate max-w-none">
+                {@html renderMarkdown(feature.planMarkdown)}
               </div>
             </div>
           </details>
         {/if}
 
         <div class="bg-green-50 border border-green-200 rounded-lg p-6 text-center">
-          <p class="text-sm text-green-800 font-medium">Plan approved</p>
+          <p class="text-sm text-green-800 font-medium">Code generated successfully</p>
           <p class="mt-1 text-sm text-green-700">
-            The pipeline will continue with code generation in a future update.
+            Your code is ready to download as a zip file.
           </p>
-          <a
-            href="/app"
-            class="mt-4 inline-block px-4 py-2 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors"
+          <button
+            onclick={downloadCode}
+            disabled={downloading}
+            class="mt-4 inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Back to dashboard
-          </a>
+            {#if downloading}
+              <svg class="w-4 h-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              Downloading...
+            {:else}
+              <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+              </svg>
+              Download code
+            {/if}
+          </button>
         </div>
       </div>
 
