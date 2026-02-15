@@ -8,23 +8,11 @@ import { cors } from 'hono/cors';
 import { errorHandler } from './middleware/errors.js';
 import { securityHeaders } from './middleware/headers.js';
 import { authMiddleware } from './middleware/auth.js';
-import { createAuthenticatedClient } from './lib/supabase.js';
+import { settings } from './routes/settings.js';
 import { logger } from './lib/logger.js';
+import type { AppEnv } from './types.js';
 
-interface Bindings {
-  SUPABASE_URL: string;
-  SUPABASE_ANON_KEY: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
-  ALLOWED_ORIGIN: string;
-}
-
-interface Variables {
-  userId: string;
-  validatedBody: unknown;
-  validatedQuery: unknown;
-}
-
-const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
+const app = new Hono<AppEnv>();
 
 // Global middleware (order matters)
 app.use('*', errorHandler());
@@ -46,6 +34,8 @@ app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOStri
 
 // Protected routes: auth required
 app.use('/api/*', authMiddleware());
+
+app.route('/api/settings', settings);
 
 app.get('/api/me', (c) => {
   const userId = c.get('userId');
