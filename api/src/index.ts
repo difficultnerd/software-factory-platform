@@ -48,11 +48,29 @@ app.get('/api/me', (c) => {
 });
 
 import { recoverStuckFeatures } from './lib/stuck-recovery.js';
+import { processPipelineStep } from './lib/pipeline.js';
+import type { PipelineMessage } from './lib/pipeline.js';
 import type { Bindings } from './types.js';
 
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Bindings, _ctx: ExecutionContext) {
     await recoverStuckFeatures(env);
+  },
+  async queue(batch: MessageBatch<PipelineMessage>, env: Bindings) {
+    for (const message of batch.messages) {
+      try {
+        await processPipelineStep(env, message.body);
+        message.ack();
+      } catch (err) {
+        logger.error({
+          event: 'queue.message.failed',
+          actor: 'system',
+          outcome: 'failure',
+          metadata: { type: message.body.type, featureId: message.body.featureId, error: err instanceof Error ? err.message : 'Unknown' },
+        });
+        message.retry();
+      }
+    }
   },
 };
