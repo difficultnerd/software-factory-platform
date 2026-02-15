@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import { apiFetch } from '$lib/api';
 
   let { data } = $props();
@@ -20,6 +21,7 @@
   let loading = $state(true);
   let error = $state('');
   let approving = $state(false);
+  let deletingFeature = $state(false);
   let pollTimer: ReturnType<typeof setInterval> | null = $state(null);
 
   function getToken(): string {
@@ -135,6 +137,27 @@
     }
     approving = false;
   }
+
+  async function deleteFeature() {
+    if (!feature) return;
+    if (!confirm('Are you sure you want to delete this feature? This cannot be undone.')) return;
+
+    deletingFeature = true;
+    error = '';
+
+    const result = await apiFetch<{ success: boolean }>(
+      `/api/features/${feature.id}`,
+      getToken(),
+      { method: 'DELETE' },
+    );
+
+    if (result.error) {
+      error = result.error;
+      deletingFeature = false;
+    } else {
+      goto('/app');
+    }
+  }
 </script>
 
 <svelte:head>
@@ -166,12 +189,22 @@
     <!-- Header -->
     <div class="flex items-start justify-between mb-6">
       <h1 class="text-2xl font-bold text-slate-900">{feature.title}</h1>
-      <span class="ml-4 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium {statusClasses(feature.status)}">
-        {#if isGenerating(feature.status)}
-          <span class="w-2 h-2 rounded-full bg-current animate-pulse"></span>
-        {/if}
-        {statusLabel(feature.status)}
-      </span>
+      <div class="flex items-center gap-3 ml-4">
+        <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium {statusClasses(feature.status)}">
+          {#if isGenerating(feature.status)}
+            <span class="w-2 h-2 rounded-full bg-current animate-pulse"></span>
+          {/if}
+          {statusLabel(feature.status)}
+        </span>
+        <button
+          type="button"
+          onclick={deleteFeature}
+          disabled={deletingFeature}
+          class="px-3 py-1.5 text-sm font-medium text-red-600 bg-white border border-red-200 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {deletingFeature ? 'Deleting...' : 'Delete'}
+        </button>
+      </div>
     </div>
 
     <!-- Status-specific content -->

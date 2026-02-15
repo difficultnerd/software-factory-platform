@@ -10,6 +10,7 @@ import { createAuthenticatedClient, createServiceClient } from '../lib/supabase.
 import { validateBody } from '../middleware/validation.js';
 import { logger } from '../lib/logger.js';
 import { runAgent } from '../lib/agents/runner.js';
+import { callCompletion } from '../lib/anthropic.js';
 import { getSpecSystemPrompt, getSpecUserPrompt } from '../lib/agents/spec-prompt.js';
 import { getPlanSystemPrompt, getPlanUserPrompt } from '../lib/agents/plan-prompt.js';
 
@@ -17,6 +18,10 @@ const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 
 const confirmSchema = z.object({
   briefMarkdown: z.string().min(10).max(50000),
+});
+
+const titleUpdateSchema = z.object({
+  title: z.string().min(1).max(200),
 });
 
 export const features = new Hono<AppEnv>();
@@ -94,6 +99,63 @@ features.get('/:id', async (c) => {
       updatedAt: feature.updated_at,
     },
   });
+});
+
+// Delete a feature
+features.delete('/:id', async (c) => {
+  const userId = c.get('userId');
+  const featureId = c.req.param('id');
+
+  if (!uuidRegex.test(featureId)) {
+    return c.json({ error: 'Invalid feature ID' }, 400);
+  }
+
+  const accessToken = c.req.header('Authorization')!.slice(7);
+  const authClient = createAuthenticatedClient(c.env, accessToken);
+
+  const { data, error: deleteError } = await authClient
+    .from('features')
+    .delete()
+    .eq('id', featureId)
+    .select('id')
+    .single();
+
+  if (deleteError || !data) {
+    return c.json({ error: 'Feature not found' }, 404);
+  }
+
+  logger.info({ event: 'features.delete', actor: userId, outcome: 'success', metadata: { featureId } });
+
+  return c.json({ success: true });
+});
+
+// Update feature title
+features.patch('/:id', validateBody(titleUpdateSchema), async (c) => {
+  const userId = c.get('userId');
+  const featureId = c.req.param('id');
+  const { title } = c.get('validatedBody') as z.infer<typeof titleUpdateSchema>;
+
+  if (!uuidRegex.test(featureId)) {
+    return c.json({ error: 'Invalid feature ID' }, 400);
+  }
+
+  const accessToken = c.req.header('Authorization')!.slice(7);
+  const authClient = createAuthenticatedClient(c.env, accessToken);
+
+  const { data, error: updateError } = await authClient
+    .from('features')
+    .update({ title })
+    .eq('id', featureId)
+    .select('id, title')
+    .single();
+
+  if (updateError || !data) {
+    return c.json({ error: 'Feature not found' }, 404);
+  }
+
+  logger.info({ event: 'features.update_title', actor: userId, outcome: 'success', metadata: { featureId } });
+
+  return c.json({ id: (data as { id: string }).id, title: (data as { title: string }).title });
 });
 
 // Confirm brief and trigger spec agent
@@ -309,9 +371,33 @@ async function runSpecAgent(
     });
 
     if (result.ok) {
+      // Attempt to generate a concise AI title from the spec
+      let aiTitle: string | null = null;
+      try {
+        const titleResult = await callCompletion(
+          apiKey,
+          [{ role: 'user', content: `Summarise what this software feature does in 5-8 words. Reply with ONLY the title, no quotes or punctuation at the end.\n\n${result.text.slice(0, 2000)}` }],
+          'You are a concise technical writer. Respond with only the short title.',
+          50,
+        );
+        if (titleResult.ok && titleResult.text.trim().length > 0) {
+          aiTitle = titleResult.text.trim().slice(0, 200);
+        }
+      } catch {
+        // Non-critical: keep original title if summarisation fails
+      }
+
+      const updateFields: Record<string, string> = {
+        spec_markdown: result.text,
+        status: 'spec_ready',
+      };
+      if (aiTitle) {
+        updateFields.title = aiTitle;
+      }
+
       await serviceClient
         .from('features')
-        .update({ spec_markdown: result.text, status: 'spec_ready' })
+        .update(updateFields)
         .eq('id', featureId);
     } else {
       await serviceClient
