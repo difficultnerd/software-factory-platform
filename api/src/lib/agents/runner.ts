@@ -10,7 +10,7 @@ import { logger } from '../logger.js';
 import type { Bindings } from '../../types.js';
 
 interface RunAgentParams {
-  agentName: 'spec' | 'planner' | 'contract_test' | 'implementer' | 'security_review' | 'code_review';
+  agentName: 'spec' | 'planner' | 'contract_test' | 'implementer' | 'security_review' | 'code_review' | 'alignment_review';
   featureId: string;
   userId: string;
   apiKey: string;

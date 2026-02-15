@@ -16,6 +16,7 @@ import { getPlanSystemPrompt, getPlanUserPrompt } from '../lib/agents/plan-promp
 import { getTestSystemPrompt, getTestUserPrompt } from '../lib/agents/test-prompt.js';
 import { getSecurityReviewSystemPrompt, getSecurityReviewUserPrompt } from '../lib/agents/security-review-prompt.js';
 import { getCodeReviewSystemPrompt, getCodeReviewUserPrompt } from '../lib/agents/code-review-prompt.js';
+import { getAlignmentReviewSystemPrompt, getSpecAlignmentUserPrompt, getPlanAlignmentUserPrompt, getTestsAlignmentUserPrompt } from '../lib/agents/alignment-review-prompt.js';
 import { runCodeAgentWithToolUse } from '../lib/agents/code-runner.js';
 import type { CodeFile } from '../lib/agents/code-runner.js';
 import { zipSync, strToU8 } from 'fflate';
@@ -70,7 +71,7 @@ features.get('/:id', async (c) => {
 
   const { data, error: fetchError } = await authClient
     .from('features')
-    .select('id, title, status, brief_markdown, spec_markdown, plan_markdown, tests_markdown, security_review_markdown, code_review_markdown, error_message, created_at, updated_at')
+    .select('id, title, status, brief_markdown, spec_markdown, plan_markdown, tests_markdown, security_review_markdown, code_review_markdown, spec_recommendation, plan_recommendation, tests_recommendation, error_message, created_at, updated_at')
     .eq('id', featureId)
     .single();
 
@@ -88,6 +89,9 @@ features.get('/:id', async (c) => {
     tests_markdown: string | null;
     security_review_markdown: string | null;
     code_review_markdown: string | null;
+    spec_recommendation: string | null;
+    plan_recommendation: string | null;
+    tests_recommendation: string | null;
     error_message: string | null;
     created_at: string;
     updated_at: string;
@@ -106,6 +110,9 @@ features.get('/:id', async (c) => {
       testsMarkdown: feature.tests_markdown,
       securityReviewMarkdown: feature.security_review_markdown,
       codeReviewMarkdown: feature.code_review_markdown,
+      specRecommendation: feature.spec_recommendation,
+      planRecommendation: feature.plan_recommendation,
+      testsRecommendation: feature.tests_recommendation,
       errorMessage: feature.error_message,
       createdAt: feature.created_at,
       updatedAt: feature.updated_at,
@@ -241,7 +248,7 @@ features.post('/:id/approve-spec', async (c) => {
   // Verify feature is in spec_ready status
   const { data: feature, error: fetchError } = await authClient
     .from('features')
-    .select('id, title, status, spec_markdown')
+    .select('id, title, status, brief_markdown, spec_markdown')
     .eq('id', featureId)
     .single();
 
@@ -249,7 +256,7 @@ features.post('/:id/approve-spec', async (c) => {
     return c.json({ error: 'Feature not found' }, 404);
   }
 
-  const f = feature as { id: string; title: string; status: string; spec_markdown: string | null };
+  const f = feature as { id: string; title: string; status: string; brief_markdown: string | null; spec_markdown: string | null };
 
   if (f.status !== 'spec_ready') {
     return c.json({ error: 'Feature specification is not ready for approval' }, 409);
@@ -280,7 +287,7 @@ features.post('/:id/approve-spec', async (c) => {
   });
 
   // Run plan agent inline
-  await runPlanAgent(c.env, userId, featureId, f.spec_markdown ?? '');
+  await runPlanAgent(c.env, userId, featureId, f.brief_markdown ?? '', f.spec_markdown ?? '');
 
   return c.json({ success: true });
 });
@@ -299,7 +306,7 @@ features.post('/:id/approve-plan', async (c) => {
 
   const { data: feature, error: fetchError } = await authClient
     .from('features')
-    .select('id, status, spec_markdown, plan_markdown')
+    .select('id, status, brief_markdown, spec_markdown, plan_markdown')
     .eq('id', featureId)
     .single();
 
@@ -307,7 +314,7 @@ features.post('/:id/approve-plan', async (c) => {
     return c.json({ error: 'Feature not found' }, 404);
   }
 
-  const f = feature as { id: string; status: string; spec_markdown: string | null; plan_markdown: string | null };
+  const f = feature as { id: string; status: string; brief_markdown: string | null; spec_markdown: string | null; plan_markdown: string | null };
 
   if (f.status !== 'plan_ready') {
     return c.json({ error: 'Feature plan is not ready for approval' }, 409);
@@ -337,7 +344,7 @@ features.post('/:id/approve-plan', async (c) => {
   });
 
   // Run contract test agent inline
-  await runTestAgent(c.env, userId, featureId, f.spec_markdown ?? '', f.plan_markdown ?? '');
+  await runTestAgent(c.env, userId, featureId, f.brief_markdown ?? '', f.spec_markdown ?? '', f.plan_markdown ?? '');
 
   return c.json({ success: true });
 });
@@ -397,6 +404,240 @@ features.post('/:id/approve-tests', async (c) => {
   await runImplementAndReviewPipeline(c.env, userId, featureId, f.spec_markdown ?? '', f.plan_markdown ?? '');
 
   return c.json({ success: true });
+});
+
+// Revise brief and restart pipeline from spec generation
+features.post('/:id/revise', validateBody(confirmSchema), async (c) => {
+  const userId = c.get('userId');
+  const featureId = c.req.param('id');
+  const { briefMarkdown } = c.get('validatedBody') as z.infer<typeof confirmSchema>;
+
+  if (!uuidRegex.test(featureId)) {
+    return c.json({ error: 'Invalid feature ID' }, 400);
+  }
+
+  const accessToken = c.req.header('Authorization')!.slice(7);
+  const authClient = createAuthenticatedClient(c.env, accessToken);
+
+  // Verify feature is at an approval gate
+  const { data: feature, error: fetchError } = await authClient
+    .from('features')
+    .select('id, title, status')
+    .eq('id', featureId)
+    .single();
+
+  if (fetchError || !feature) {
+    return c.json({ error: 'Feature not found' }, 404);
+  }
+
+  const f = feature as { id: string; title: string; status: string };
+  const allowedStatuses = ['spec_ready', 'plan_ready', 'tests_ready'];
+
+  if (!allowedStatuses.includes(f.status)) {
+    return c.json({ error: 'Feature is not at an approval gate' }, 409);
+  }
+
+  const serviceClient = createServiceClient(c.env);
+
+  // Delete existing artifacts from R2 (best-effort)
+  const { data: artifacts } = await serviceClient
+    .from('artifacts')
+    .select('r2_key')
+    .eq('feature_id', featureId)
+    .eq('user_id', userId);
+
+  if (artifacts && artifacts.length > 0) {
+    for (const artifact of artifacts as Array<{ r2_key: string }>) {
+      try {
+        await c.env.ARTIFACTS.delete(artifact.r2_key);
+      } catch {
+        // Best-effort R2 cleanup
+      }
+    }
+    await serviceClient
+      .from('artifacts')
+      .delete()
+      .eq('feature_id', featureId)
+      .eq('user_id', userId);
+  }
+
+  // Clear all downstream fields and restart from spec_generating
+  const { error: updateError } = await serviceClient
+    .from('features')
+    .update({
+      brief_markdown: briefMarkdown,
+      status: 'spec_generating',
+      spec_markdown: null,
+      spec_recommendation: null,
+      plan_markdown: null,
+      plan_recommendation: null,
+      tests_markdown: null,
+      tests_recommendation: null,
+      security_review_markdown: null,
+      code_review_markdown: null,
+      error_message: null,
+    })
+    .eq('id', featureId);
+
+  if (updateError) {
+    logger.error({
+      event: 'features.revise',
+      actor: userId,
+      outcome: 'failure',
+      metadata: { featureId, error: updateError.message },
+    });
+    return c.json({ error: 'Failed to revise feature' }, 500);
+  }
+
+  logger.info({
+    event: 'features.revise',
+    actor: userId,
+    outcome: 'success',
+    metadata: { featureId },
+  });
+
+  // Run spec agent inline with revised brief
+  await runSpecAgent(c.env, userId, featureId, f.title, briefMarkdown);
+
+  return c.json({ success: true });
+});
+
+// Retry from last checkpoint after failure
+features.post('/:id/retry', async (c) => {
+  const userId = c.get('userId');
+  const featureId = c.req.param('id');
+
+  if (!uuidRegex.test(featureId)) {
+    return c.json({ error: 'Invalid feature ID' }, 400);
+  }
+
+  const accessToken = c.req.header('Authorization')!.slice(7);
+  const authClient = createAuthenticatedClient(c.env, accessToken);
+
+  const { data: feature, error: fetchError } = await authClient
+    .from('features')
+    .select('id, title, status, brief_markdown, spec_markdown, plan_markdown, tests_markdown')
+    .eq('id', featureId)
+    .single();
+
+  if (fetchError || !feature) {
+    return c.json({ error: 'Feature not found' }, 404);
+  }
+
+  const f = feature as {
+    id: string;
+    title: string;
+    status: string;
+    brief_markdown: string | null;
+    spec_markdown: string | null;
+    plan_markdown: string | null;
+    tests_markdown: string | null;
+  };
+
+  if (f.status !== 'failed') {
+    return c.json({ error: 'Feature is not in failed status' }, 409);
+  }
+
+  const serviceClient = createServiceClient(c.env);
+
+  // Determine last checkpoint based on existing deliverables
+  let targetStatus: string;
+
+  if (f.tests_markdown) {
+    // Tests existed — clear security/code review, delete artifacts, re-run from tests_ready
+    const { data: artifacts } = await serviceClient
+      .from('artifacts')
+      .select('r2_key')
+      .eq('feature_id', featureId)
+      .eq('user_id', userId);
+
+    if (artifacts && artifacts.length > 0) {
+      for (const artifact of artifacts as Array<{ r2_key: string }>) {
+        try {
+          await c.env.ARTIFACTS.delete(artifact.r2_key);
+        } catch {
+          // Best-effort R2 cleanup
+        }
+      }
+      await serviceClient
+        .from('artifacts')
+        .delete()
+        .eq('feature_id', featureId)
+        .eq('user_id', userId);
+    }
+
+    await serviceClient
+      .from('features')
+      .update({
+        status: 'tests_ready',
+        security_review_markdown: null,
+        code_review_markdown: null,
+        error_message: null,
+      })
+      .eq('id', featureId);
+
+    targetStatus = 'tests_ready';
+  } else if (f.plan_markdown) {
+    // Plan existed — clear tests + downstream
+    await serviceClient
+      .from('features')
+      .update({
+        status: 'plan_ready',
+        tests_markdown: null,
+        tests_recommendation: null,
+        security_review_markdown: null,
+        code_review_markdown: null,
+        error_message: null,
+      })
+      .eq('id', featureId);
+
+    targetStatus = 'plan_ready';
+  } else if (f.spec_markdown) {
+    // Spec existed — clear plan + downstream
+    await serviceClient
+      .from('features')
+      .update({
+        status: 'spec_ready',
+        plan_markdown: null,
+        plan_recommendation: null,
+        tests_markdown: null,
+        tests_recommendation: null,
+        security_review_markdown: null,
+        code_review_markdown: null,
+        error_message: null,
+      })
+      .eq('id', featureId);
+
+    targetStatus = 'spec_ready';
+  } else {
+    // Nothing exists — go back to drafting
+    await serviceClient
+      .from('features')
+      .update({
+        status: 'drafting',
+        spec_markdown: null,
+        spec_recommendation: null,
+        plan_markdown: null,
+        plan_recommendation: null,
+        tests_markdown: null,
+        tests_recommendation: null,
+        security_review_markdown: null,
+        code_review_markdown: null,
+        error_message: null,
+      })
+      .eq('id', featureId);
+
+    targetStatus = 'drafting';
+  }
+
+  logger.info({
+    event: 'features.retry',
+    actor: userId,
+    outcome: 'success',
+    metadata: { featureId, targetStatus },
+  });
+
+  return c.json({ success: true, targetStatus });
 });
 
 // Download generated code as zip
@@ -547,9 +788,29 @@ async function runSpecAgent(
         // Non-critical: keep original title if summarisation fails
       }
 
-      const updateFields: Record<string, string> = {
+      // Run alignment reviewer (non-critical)
+      let specRecommendation: string | null = null;
+      try {
+        const reviewResult = await runAgent({
+          agentName: 'alignment_review',
+          featureId,
+          userId,
+          apiKey,
+          systemPrompt: getAlignmentReviewSystemPrompt(),
+          userPrompt: getSpecAlignmentUserPrompt(briefMarkdown, result.text),
+          env,
+        });
+        if (reviewResult.ok) {
+          specRecommendation = reviewResult.text;
+        }
+      } catch {
+        // Non-critical: proceed without recommendation
+      }
+
+      const updateFields: Record<string, string | null> = {
         spec_markdown: result.text,
         status: 'spec_ready',
+        spec_recommendation: specRecommendation,
       };
       if (aiTitle) {
         updateFields.title = aiTitle;
@@ -587,6 +848,7 @@ async function runPlanAgent(
   env: AppEnv['Bindings'],
   userId: string,
   featureId: string,
+  briefMarkdown: string,
   specMarkdown: string,
 ): Promise<void> {
   const serviceClient = createServiceClient(env);
@@ -606,9 +868,28 @@ async function runPlanAgent(
     });
 
     if (result.ok) {
+      // Run alignment reviewer (non-critical)
+      let planRecommendation: string | null = null;
+      try {
+        const reviewResult = await runAgent({
+          agentName: 'alignment_review',
+          featureId,
+          userId,
+          apiKey,
+          systemPrompt: getAlignmentReviewSystemPrompt(),
+          userPrompt: getPlanAlignmentUserPrompt(briefMarkdown, specMarkdown, result.text),
+          env,
+        });
+        if (reviewResult.ok) {
+          planRecommendation = reviewResult.text;
+        }
+      } catch {
+        // Non-critical: proceed without recommendation
+      }
+
       await serviceClient
         .from('features')
-        .update({ plan_markdown: result.text, status: 'plan_ready' })
+        .update({ plan_markdown: result.text, plan_recommendation: planRecommendation, status: 'plan_ready' })
         .eq('id', featureId);
     } else {
       await serviceClient
@@ -638,6 +919,7 @@ async function runTestAgent(
   env: AppEnv['Bindings'],
   userId: string,
   featureId: string,
+  briefMarkdown: string,
   specMarkdown: string,
   planMarkdown: string,
 ): Promise<void> {
@@ -658,9 +940,28 @@ async function runTestAgent(
     });
 
     if (result.ok) {
+      // Run alignment reviewer (non-critical)
+      let testsRecommendation: string | null = null;
+      try {
+        const reviewResult = await runAgent({
+          agentName: 'alignment_review',
+          featureId,
+          userId,
+          apiKey,
+          systemPrompt: getAlignmentReviewSystemPrompt(),
+          userPrompt: getTestsAlignmentUserPrompt(briefMarkdown, specMarkdown, planMarkdown, result.text),
+          env,
+        });
+        if (reviewResult.ok) {
+          testsRecommendation = reviewResult.text;
+        }
+      } catch {
+        // Non-critical: proceed without recommendation
+      }
+
       await serviceClient
         .from('features')
-        .update({ tests_markdown: result.text, status: 'tests_ready' })
+        .update({ tests_markdown: result.text, tests_recommendation: testsRecommendation, status: 'tests_ready' })
         .eq('id', featureId);
     } else {
       await serviceClient

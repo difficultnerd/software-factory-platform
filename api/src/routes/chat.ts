@@ -13,6 +13,8 @@ import { logger } from '../lib/logger.js';
 import { streamChatCompletion } from '../lib/anthropic.js';
 import { BA_SYSTEM_PROMPT } from '../lib/ba-prompt.js';
 
+const CHAT_ALLOWED_STATUSES = ['drafting', 'spec_ready', 'plan_ready', 'tests_ready'];
+
 const messageSchema = z.object({
   featureId: z.string().uuid().nullish(),
   message: z.string().min(1).max(10000),
@@ -79,7 +81,7 @@ chat.post('/message', validateBody(messageSchema), async (c) => {
       metadata: { featureId },
     });
   } else {
-    // Verify feature exists and is in drafting status
+    // Verify feature exists and is in an allowed status
     const { data: existing, error: fetchError } = await authClient
       .from('features')
       .select('id, status')
@@ -91,8 +93,8 @@ chat.post('/message', validateBody(messageSchema), async (c) => {
     }
 
     const feature = existing as { id: string; status: string };
-    if (feature.status !== 'drafting') {
-      return c.json({ error: 'Feature is no longer in drafting status' }, 409);
+    if (!CHAT_ALLOWED_STATUSES.includes(feature.status)) {
+      return c.json({ error: 'Feature is not in a status that allows chat' }, 409);
     }
   }
 
@@ -130,6 +132,49 @@ chat.post('/message', validateBody(messageSchema), async (c) => {
 
   const history = (historyRows ?? []) as Array<{ role: 'user' | 'assistant'; content: string }>;
 
+  // Build system prompt — augment with pipeline context at approval gates
+  let systemPrompt = BA_SYSTEM_PROMPT;
+  {
+    const { data: featureData } = await authClient
+      .from('features')
+      .select('status, brief_markdown, spec_markdown, plan_markdown, tests_markdown')
+      .eq('id', featureId)
+      .single();
+
+    if (featureData) {
+      const fd = featureData as {
+        status: string;
+        brief_markdown: string | null;
+        spec_markdown: string | null;
+        plan_markdown: string | null;
+        tests_markdown: string | null;
+      };
+
+      if (fd.status === 'spec_ready' || fd.status === 'plan_ready' || fd.status === 'tests_ready') {
+        const truncate = (s: string | null, max: number): string =>
+          s ? (s.length > max ? s.slice(0, max) + '\n\n[Truncated]' : s) : '(Not yet generated)';
+
+        systemPrompt += `
+
+## Pipeline Context
+
+The user is revisiting this feature after deliverables have been generated. Help them refine their requirements. If they want changes, produce an updated brief under a \`## Brief\` heading as you would normally.
+
+### Current Brief
+${fd.brief_markdown ?? '(No brief)'}
+
+### Current Specification (may be truncated)
+${truncate(fd.spec_markdown, 3000)}
+
+### Current Plan (may be truncated)
+${truncate(fd.plan_markdown, 3000)}
+
+### Current Tests (may be truncated)
+${truncate(fd.tests_markdown, 3000)}`;
+      }
+    }
+  }
+
   // Stream response via SSE
   const capturedFeatureId = featureId;
   return streamSSE(c, async (stream) => {
@@ -142,7 +187,7 @@ chat.post('/message', validateBody(messageSchema), async (c) => {
     let fullResponse = '';
 
     try {
-      for await (const event of streamChatCompletion(apiKey, history, BA_SYSTEM_PROMPT)) {
+      for await (const event of streamChatCompletion(apiKey, history, systemPrompt)) {
         if (event.type === 'text') {
           fullResponse += event.text;
           await stream.writeSSE({

@@ -20,6 +20,7 @@
   let featureStatus: string | null = $state(null);
   let confirming = $state(false);
   let confirmed = $state(false);
+  let revising = $state(false);
   let loadingHistory = $state(false);
 
   let canSend = $derived(input.trim().length > 0 && !streaming);
@@ -71,7 +72,8 @@
     } else if (result.data) {
       messages = result.data.messages;
       featureStatus = result.data.feature.status;
-      if (result.data.feature.status !== 'drafting') {
+      const chatOpenStatuses = ['drafting', 'spec_ready', 'plan_ready', 'tests_ready'];
+      if (!chatOpenStatuses.includes(result.data.feature.status)) {
         confirmed = true;
       }
     }
@@ -180,6 +182,38 @@
     confirming = false;
   }
 
+  let isAtApprovalGate = $derived(
+    featureStatus === 'spec_ready' || featureStatus === 'plan_ready' || featureStatus === 'tests_ready',
+  );
+
+  async function reviseBrief() {
+    if (!featureId) return;
+
+    revising = true;
+    error = '';
+
+    const briefMarkdown = extractBrief();
+    if (!briefMarkdown) {
+      error = 'Could not find the brief in the conversation.';
+      revising = false;
+      return;
+    }
+
+    const result = await apiFetch<{ success: boolean }>(
+      `/api/features/${featureId}/revise`,
+      getToken(),
+      { method: 'POST', body: { briefMarkdown } },
+    );
+
+    if (result.error) {
+      error = result.error;
+    } else {
+      confirmed = true;
+      featureStatus = 'spec_generating';
+    }
+    revising = false;
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -257,7 +291,7 @@
     </div>
 
     <!-- Brief confirmation -->
-    {#if briefDetected && !confirmed}
+    {#if briefDetected && !confirmed && !isAtApprovalGate}
       <div class="flex-shrink-0 pb-3">
         <div class="p-4 bg-green-50 border border-green-200 rounded-lg">
           <p class="text-sm text-green-800 font-medium">Brief ready for confirmation</p>
@@ -270,6 +304,25 @@
             class="mt-3 px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {confirming ? 'Generating specification...' : 'Confirm brief and start building'}
+          </button>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Revise brief at approval gate -->
+    {#if briefDetected && isAtApprovalGate && !confirmed}
+      <div class="flex-shrink-0 pb-3">
+        <div class="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <p class="text-sm text-amber-800 font-medium">Revised brief detected</p>
+          <p class="mt-1 text-sm text-amber-700">
+            Confirm to clear downstream deliverables and restart from specification generation.
+          </p>
+          <button
+            onclick={reviseBrief}
+            disabled={revising || streaming}
+            class="mt-3 px-4 py-2 text-sm font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {revising ? 'Regenerating specification...' : 'Revise brief and rebuild'}
           </button>
         </div>
       </div>

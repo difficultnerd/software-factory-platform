@@ -17,6 +17,9 @@
     testsMarkdown: string | null;
     securityReviewMarkdown: string | null;
     codeReviewMarkdown: string | null;
+    specRecommendation: string | null;
+    planRecommendation: string | null;
+    testsRecommendation: string | null;
     errorMessage: string | null;
     createdAt: string;
     updatedAt: string;
@@ -26,6 +29,7 @@
   let loading = $state(true);
   let error = $state('');
   let approving = $state(false);
+  let retrying = $state(false);
   let deletingFeature = $state(false);
   let downloading = $state(false);
   let pollTimer: ReturnType<typeof setInterval> | null = $state(null);
@@ -287,6 +291,36 @@
       goto('/app');
     }
   }
+
+  function parseRecommendationVerdict(recommendation: string | null): 'APPROVE' | 'REVISE' | null {
+    if (!recommendation) return null;
+    const lines = recommendation.trim().split('\n');
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
+      const line = lines[i]?.trim();
+      if (line === 'VERDICT: APPROVE') return 'APPROVE';
+      if (line === 'VERDICT: REVISE') return 'REVISE';
+    }
+    return null;
+  }
+
+  async function retryFeature() {
+    if (!feature) return;
+    retrying = true;
+    error = '';
+
+    const result = await apiFetch<{ success: boolean; targetStatus: string }>(
+      `/api/features/${feature.id}/retry`,
+      getToken(),
+      { method: 'POST' },
+    );
+
+    if (result.error) {
+      error = result.error;
+    } else {
+      await loadFeature();
+    }
+    retrying = false;
+  }
 </script>
 
 <svelte:head>
@@ -487,11 +521,23 @@
       </div>
 
     {:else if feature.status === 'spec_ready'}
+      {@const specVerdict = parseRecommendationVerdict(feature.specRecommendation)}
       <div class="space-y-4">
-        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <p class="text-sm text-blue-800 font-medium">Specification ready for review</p>
-          <p class="mt-1 text-sm text-blue-700">Review the specification below, then approve to generate the implementation plan.</p>
-        </div>
+        {#if feature.specRecommendation}
+          <div class="rounded-lg p-4 {specVerdict === 'APPROVE' ? 'bg-green-50 border border-green-200' : 'bg-amber-50 border border-amber-200'}">
+            <p class="text-sm font-medium {specVerdict === 'APPROVE' ? 'text-green-800' : 'text-amber-800'}">
+              {specVerdict === 'APPROVE' ? 'Alignment review: Approved' : 'Alignment review: Revision recommended'}
+            </p>
+            <div class="mt-2 prose prose-sm max-w-none {specVerdict === 'APPROVE' ? 'prose-green' : 'prose-amber'}">
+              {@html renderMarkdown(feature.specRecommendation)}
+            </div>
+          </div>
+        {:else}
+          <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p class="text-sm text-blue-800 font-medium">Specification ready for review</p>
+            <p class="mt-1 text-sm text-blue-700">Review the specification below, then approve to generate the implementation plan.</p>
+          </div>
+        {/if}
 
         <div class="bg-white rounded-xl border border-slate-200 p-6">
           <div class="prose prose-sm prose-slate max-w-none">
@@ -503,15 +549,15 @@
           <button
             onclick={approveSpec}
             disabled={approving}
-            class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            class="px-5 py-2.5 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed {specVerdict === 'REVISE' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-brand-600 hover:bg-brand-700'}"
           >
-            {approving ? 'Generating plan...' : 'Approve specification'}
+            {approving ? 'Generating plan...' : specVerdict === 'REVISE' ? 'Approve anyway' : 'Approve specification'}
           </button>
           <a
             href="/app/features?feature={feature.id}"
             class="px-5 py-2.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
           >
-            Back to chat
+            Discuss with BA
           </a>
         </div>
       </div>
@@ -529,11 +575,23 @@
       </div>
 
     {:else if feature.status === 'plan_ready'}
+      {@const planVerdict = parseRecommendationVerdict(feature.planRecommendation)}
       <div class="space-y-4">
-        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <p class="text-sm text-blue-800 font-medium">Implementation plan ready for review</p>
-          <p class="mt-1 text-sm text-blue-700">Review the plan below, then approve to generate test contracts.</p>
-        </div>
+        {#if feature.planRecommendation}
+          <div class="rounded-lg p-4 {planVerdict === 'APPROVE' ? 'bg-green-50 border border-green-200' : 'bg-amber-50 border border-amber-200'}">
+            <p class="text-sm font-medium {planVerdict === 'APPROVE' ? 'text-green-800' : 'text-amber-800'}">
+              {planVerdict === 'APPROVE' ? 'Alignment review: Approved' : 'Alignment review: Revision recommended'}
+            </p>
+            <div class="mt-2 prose prose-sm max-w-none {planVerdict === 'APPROVE' ? 'prose-green' : 'prose-amber'}">
+              {@html renderMarkdown(feature.planRecommendation)}
+            </div>
+          </div>
+        {:else}
+          <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p class="text-sm text-blue-800 font-medium">Implementation plan ready for review</p>
+            <p class="mt-1 text-sm text-blue-700">Review the plan below, then approve to generate test contracts.</p>
+          </div>
+        {/if}
 
         <div class="bg-white rounded-xl border border-slate-200 p-6">
           <div class="prose prose-sm prose-slate max-w-none">
@@ -545,10 +603,16 @@
           <button
             onclick={approvePlan}
             disabled={approving}
-            class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            class="px-5 py-2.5 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed {planVerdict === 'REVISE' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-brand-600 hover:bg-brand-700'}"
           >
-            {approving ? 'Generating tests...' : 'Approve plan'}
+            {approving ? 'Generating tests...' : planVerdict === 'REVISE' ? 'Approve anyway' : 'Approve plan'}
           </button>
+          <a
+            href="/app/features?feature={feature.id}"
+            class="px-5 py-2.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            Discuss with BA
+          </a>
         </div>
       </div>
 
@@ -565,11 +629,23 @@
       </div>
 
     {:else if feature.status === 'tests_ready'}
+      {@const testsVerdict = parseRecommendationVerdict(feature.testsRecommendation)}
       <div class="space-y-4">
-        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <p class="text-sm text-blue-800 font-medium">Test contracts ready for review</p>
-          <p class="mt-1 text-sm text-blue-700">Review the test contracts below, then approve to begin code generation and automated review.</p>
-        </div>
+        {#if feature.testsRecommendation}
+          <div class="rounded-lg p-4 {testsVerdict === 'APPROVE' ? 'bg-green-50 border border-green-200' : 'bg-amber-50 border border-amber-200'}">
+            <p class="text-sm font-medium {testsVerdict === 'APPROVE' ? 'text-green-800' : 'text-amber-800'}">
+              {testsVerdict === 'APPROVE' ? 'Alignment review: Approved' : 'Alignment review: Revision recommended'}
+            </p>
+            <div class="mt-2 prose prose-sm max-w-none {testsVerdict === 'APPROVE' ? 'prose-green' : 'prose-amber'}">
+              {@html renderMarkdown(feature.testsRecommendation)}
+            </div>
+          </div>
+        {:else}
+          <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p class="text-sm text-blue-800 font-medium">Test contracts ready for review</p>
+            <p class="mt-1 text-sm text-blue-700">Review the test contracts below, then approve to begin code generation and automated review.</p>
+          </div>
+        {/if}
 
         <div class="bg-white rounded-xl border border-slate-200 p-6">
           <div class="prose prose-sm prose-slate max-w-none">
@@ -581,10 +657,16 @@
           <button
             onclick={approveTests}
             disabled={approving}
-            class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            class="px-5 py-2.5 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed {testsVerdict === 'REVISE' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-brand-600 hover:bg-brand-700'}"
           >
-            {approving ? 'Generating code...' : 'Approve tests'}
+            {approving ? 'Generating code...' : testsVerdict === 'REVISE' ? 'Approve anyway' : 'Approve tests'}
           </button>
+          <a
+            href="/app/features?feature={feature.id}"
+            class="px-5 py-2.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            Discuss with BA
+          </a>
         </div>
       </div>
 
@@ -657,11 +739,18 @@
         </div>
 
         <div class="flex items-center gap-3">
+          <button
+            onclick={retryFeature}
+            disabled={retrying}
+            class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {retrying ? 'Retrying...' : 'Retry from last checkpoint'}
+          </button>
           <a
             href="/app/features?feature={feature.id}"
             class="px-5 py-2.5 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
           >
-            Back to chat
+            Discuss with BA
           </a>
           <a
             href="/app"
