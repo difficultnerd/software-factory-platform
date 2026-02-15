@@ -1,14 +1,16 @@
 /**
  * @file Authentication middleware
- * @purpose Verifies Supabase JWTs and extracts user identity
+ * @purpose Verifies Supabase JWTs using JWKS (asymmetric verification)
  * @invariants All protected routes must pass through this middleware
  */
 import type { MiddlewareHandler } from 'hono';
-import { jwtVerify } from 'jose';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
 interface AuthEnv {
-  SUPABASE_JWT_SECRET: string;
+  SUPABASE_URL: string;
 }
+
+let jwks: ReturnType<typeof createRemoteJWKSet> | null = null;
 
 export const authMiddleware = (): MiddlewareHandler<{ Bindings: AuthEnv }> => {
   return async (c, next) => {
@@ -21,8 +23,12 @@ export const authMiddleware = (): MiddlewareHandler<{ Bindings: AuthEnv }> => {
     const token = authHeader.slice(7);
 
     try {
-      const secret = new TextEncoder().encode(c.env.SUPABASE_JWT_SECRET);
-      const { payload } = await jwtVerify(token, secret, {
+      if (!jwks) {
+        const jwksUrl = new URL('/auth/v1/.well-known/jwks.json', c.env.SUPABASE_URL);
+        jwks = createRemoteJWKSet(jwksUrl);
+      }
+
+      const { payload } = await jwtVerify(token, jwks, {
         audience: 'authenticated',
       });
 

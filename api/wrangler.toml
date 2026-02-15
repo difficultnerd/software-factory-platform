@@ -10,4 +10,3 @@ ALLOWED_ORIGIN = "http://localhost:5173"
 # wrangler secret put SUPABASE_URL
 # wrangler secret put SUPABASE_ANON_KEY
 # wrangler secret put SUPABASE_SERVICE_ROLE_KEY
-# wrangler secret put SUPABASE_JWT_SECRET
