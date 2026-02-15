@@ -14,7 +14,7 @@ import { streamChatCompletion } from '../lib/anthropic.js';
 import { BA_SYSTEM_PROMPT } from '../lib/ba-prompt.js';
 
 const messageSchema = z.object({
-  featureId: z.string().uuid().optional(),
+  featureId: z.string().uuid().nullish(),
   message: z.string().min(1).max(10000),
 });
 
