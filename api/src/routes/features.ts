@@ -816,10 +816,15 @@ async function runSpecAgent(
         updateFields.title = aiTitle;
       }
 
-      await serviceClient
+      const { error: saveError } = await serviceClient
         .from('features')
         .update(updateFields)
         .eq('id', featureId);
+
+      if (saveError) {
+        logger.error({ event: 'agent.spec.save', actor: userId, outcome: 'failure', metadata: { featureId, error: saveError.message } });
+        await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to save specification: ${saveError.message}` }).eq('id', featureId);
+      }
     } else {
       await serviceClient
         .from('features')
@@ -887,10 +892,15 @@ async function runPlanAgent(
         // Non-critical: proceed without recommendation
       }
 
-      await serviceClient
+      const { error: saveError } = await serviceClient
         .from('features')
         .update({ plan_markdown: result.text, plan_recommendation: planRecommendation, status: 'plan_ready' })
         .eq('id', featureId);
+
+      if (saveError) {
+        logger.error({ event: 'agent.planner.save', actor: userId, outcome: 'failure', metadata: { featureId, error: saveError.message } });
+        await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to save plan: ${saveError.message}` }).eq('id', featureId);
+      }
     } else {
       await serviceClient
         .from('features')
@@ -959,10 +969,15 @@ async function runTestAgent(
         // Non-critical: proceed without recommendation
       }
 
-      await serviceClient
+      const { error: saveError } = await serviceClient
         .from('features')
         .update({ tests_markdown: result.text, tests_recommendation: testsRecommendation, status: 'tests_ready' })
         .eq('id', featureId);
+
+      if (saveError) {
+        logger.error({ event: 'agent.contract_test.save', actor: userId, outcome: 'failure', metadata: { featureId, error: saveError.message } });
+        await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to save tests: ${saveError.message}` }).eq('id', featureId);
+      }
     } else {
       await serviceClient
         .from('features')
@@ -1023,7 +1038,7 @@ async function runImplementAndReviewPipeline(
       const r2Key = `${userId}/${featureId}/${file.path}`;
       await env.ARTIFACTS.put(r2Key, file.content);
 
-      await serviceClient.from('artifacts').insert({
+      const { error: insertError } = await serviceClient.from('artifacts').insert({
         feature_id: featureId,
         user_id: userId,
         file_path: file.path,
@@ -1031,6 +1046,10 @@ async function runImplementAndReviewPipeline(
         size_bytes: new TextEncoder().encode(file.content).byteLength,
         artifact_type: 'implementation',
       });
+
+      if (insertError) {
+        logger.error({ event: 'agent.pipeline.artifact_insert', actor: userId, outcome: 'failure', metadata: { featureId, filePath: file.path, error: insertError.message } });
+      }
     }
 
     // Transition to review
@@ -1038,10 +1057,16 @@ async function runImplementAndReviewPipeline(
     if (codeResult.wasTruncated) {
       reviewUpdate.error_message = `Output was truncated: ${codeResult.files.length} complete file(s) were recovered, but some files may be missing.`;
     }
-    await serviceClient
+    const { error: reviewTransitionError } = await serviceClient
       .from('features')
       .update(reviewUpdate)
       .eq('id', featureId);
+
+    if (reviewTransitionError) {
+      logger.error({ event: 'agent.pipeline.review_transition', actor: userId, outcome: 'failure', metadata: { featureId, error: reviewTransitionError.message } });
+      await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to transition to review: ${reviewTransitionError.message}` }).eq('id', featureId);
+      return;
+    }
 
     // Step 2: Run security review
     const securityResult = await runAgent({
@@ -1055,10 +1080,14 @@ async function runImplementAndReviewPipeline(
     });
 
     if (securityResult.ok) {
-      await serviceClient
+      const { error: secSaveError } = await serviceClient
         .from('features')
         .update({ security_review_markdown: securityResult.text })
         .eq('id', featureId);
+
+      if (secSaveError) {
+        logger.error({ event: 'agent.security_review.save', actor: userId, outcome: 'failure', metadata: { featureId, error: secSaveError.message } });
+      }
     }
 
     // Step 3: Run code review
@@ -1073,10 +1102,14 @@ async function runImplementAndReviewPipeline(
     });
 
     if (codeReviewResult.ok) {
-      await serviceClient
+      const { error: crSaveError } = await serviceClient
         .from('features')
         .update({ code_review_markdown: codeReviewResult.text })
         .eq('id', featureId);
+
+      if (crSaveError) {
+        logger.error({ event: 'agent.code_review.save', actor: userId, outcome: 'failure', metadata: { featureId, error: crSaveError.message } });
+      }
     }
 
     // Step 4: Parse verdicts and determine final status
@@ -1084,21 +1117,29 @@ async function runImplementAndReviewPipeline(
     const codeReviewVerdict = codeReviewResult.ok ? parseVerdict(codeReviewResult.text) : 'FAIL';
 
     if (securityVerdict === 'PASS' && codeReviewVerdict === 'PASS') {
-      await serviceClient
+      const { error: doneError } = await serviceClient
         .from('features')
         .update({ status: 'done' })
         .eq('id', featureId);
+
+      if (doneError) {
+        logger.error({ event: 'agent.pipeline.done_transition', actor: userId, outcome: 'failure', metadata: { featureId, error: doneError.message } });
+      }
     } else {
       const failures: string[] = [];
       if (securityVerdict !== 'PASS') failures.push('security review');
       if (codeReviewVerdict !== 'PASS') failures.push('code review');
-      await serviceClient
+      const { error: failError } = await serviceClient
         .from('features')
         .update({
           status: 'failed',
           error_message: `Review failed: ${failures.join(' and ')} did not pass. See review reports for details.`,
         })
         .eq('id', featureId);
+
+      if (failError) {
+        logger.error({ event: 'agent.pipeline.fail_transition', actor: userId, outcome: 'failure', metadata: { featureId, error: failError.message } });
+      }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error in implementation pipeline';

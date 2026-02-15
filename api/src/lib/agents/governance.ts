@@ -35,6 +35,13 @@ Build Practical is a multi-tenant AI-powered software platform. Non-technical us
 - User secrets stored in Supabase Vault (encrypted at rest)
 - Security headers: HSTS, CSP, X-Frame-Options, X-Content-Type-Options
 
+### Compliance Standards
+
+Generated code must align with:
+
+- **OWASP ASVS Level 2** (Standard) — the Application Security Verification Standard provides detailed security requirements. Key categories: V2 (Authentication), V3 (Session Management), V4 (Access Control), V5 (Validation/Sanitisation), V6 (Cryptography), V7 (Error Handling/Logging), V8 (Data Protection), V13 (API Security), V14 (Configuration).
+- **Australian ISM (Information Security Manual)** — the Australian Government's security framework. Key controls: ISM-0974 (input validation), ISM-1139 (output encoding), ISM-1235 (parameterised queries), ISM-0988 (authentication strength), ISM-1401 (session management), ISM-0270 (encryption of data at rest), ISM-0459 (TLS for data in transit), ISM-0585 (access control enforcement), ISM-0120 (event logging).
+
 ### Conventions
 
 - Australian English throughout (e.g. "colour", "organisation", "behaviour")

@@ -63,9 +63,17 @@ List edge cases and how each should be handled.
 
 ## Non-Functional Requirements
 - Performance expectations
-- Security considerations beyond the baseline
 - Accessibility requirements
 - Data retention and privacy
+
+### Security Requirements (address each)
+- Authentication: what level of authentication is needed? Multi-factor? Password complexity?
+- Authorisation: what access control rules apply? Which users can see/edit what data?
+- Data classification: which fields contain sensitive or personal data? What encryption is required?
+- Input validation: what are the boundaries and constraints for user-supplied data?
+- Audit logging: what security-relevant events must be logged?
+- Session management: timeout requirements, concurrent session limits
+- Compliance: note any OWASP ASVS Level 2 or Australian ISM controls that are particularly relevant to this feature
 
 ## Rules
 

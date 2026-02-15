@@ -44,10 +44,34 @@ For each input or data boundary:
 - Valid values and constraints
 - Expected error behaviour for invalid input
 
-## Security Test Cases
-- Authentication/authorisation scenarios
-- Input sanitisation expectations
-- Data access boundary tests (RLS verification)
+## Security Test Cases (OWASP ASVS L2 and ISM aligned)
+
+### Authentication and Session Management
+- Verify authentication is required for all protected endpoints
+- Verify session tokens are invalidated on logout
+- Verify password/credential storage uses strong hashing (bcrypt/argon2)
+- Verify brute-force protections exist (rate limiting, account lockout)
+
+### Access Control (ISM-0585, ASVS V4)
+- Verify RLS policies prevent users from accessing other users' data
+- Verify each API endpoint enforces authorisation (not just authentication)
+- Verify principle of least privilege — users cannot escalate their own permissions
+
+### Input Validation and Sanitisation (ISM-0974, ISM-1139, ASVS V5)
+- Verify all user inputs are validated with Zod schemas at API boundaries
+- Verify SQL injection is prevented via parameterised queries (ISM-1235)
+- Verify XSS is prevented via output encoding
+- Verify request size limits are enforced
+
+### Data Protection (ISM-0270, ISM-0459, ASVS V8)
+- Verify sensitive data is encrypted at rest (Vault for secrets)
+- Verify no secrets or API keys appear in client-side code
+- Verify API responses do not leak sensitive fields unnecessarily
+- Verify error messages do not expose stack traces or internal details
+
+### Logging and Error Handling (ISM-0120, ASVS V7)
+- Verify security-relevant events are logged (login, failed auth, permission denied)
+- Verify no sensitive data appears in log output
 
 ## Performance Expectations
 - Expected response times or throughput

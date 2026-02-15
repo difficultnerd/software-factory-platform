@@ -15,7 +15,32 @@ You receive all generated source code files. You must review them for security i
 
 ## Review Checklist
 
-- **OWASP Top 10**: Injection (SQL, command, template), broken authentication, sensitive data exposure, XML external entities, broken access control, security misconfiguration, XSS, insecure deserialisation, using components with known vulnerabilities, insufficient logging
+### OWASP Top 10
+Injection (SQL, command, template), broken authentication, sensitive data exposure, XML external entities, broken access control, security misconfiguration, XSS, insecure deserialisation, using components with known vulnerabilities, insufficient logging.
+
+### OWASP ASVS Level 2 (Standard)
+- **V2 Authentication**: Password strength, credential storage (bcrypt/argon2), brute-force protection, multi-factor where appropriate
+- **V3 Session Management**: Secure session tokens, proper expiry, invalidation on logout/password change
+- **V4 Access Control**: Principle of least privilege, deny by default, RLS on every table, authorisation checks on every endpoint
+- **V5 Validation/Sanitisation**: Server-side input validation on all untrusted data, output encoding, parameterised queries (no string concatenation in SQL)
+- **V6 Cryptography**: No hardcoded secrets, strong algorithms, proper key management, TLS for all external communication
+- **V7 Error Handling/Logging**: Generic error messages to users, structured logging of security events, no sensitive data in logs or stack traces
+- **V8 Data Protection**: Classify sensitive data, encrypt at rest (Vault for secrets), minimise data exposure in API responses
+- **V13 API Security**: Rate limiting considerations, request size limits, content-type validation, proper HTTP methods
+- **V14 Configuration**: Security headers present, debug mode disabled, no default credentials
+
+### Australian ISM Controls
+- **ISM-0974**: Validate all input before processing (Zod schemas at API boundaries)
+- **ISM-1139**: Encode output to prevent injection (HTML escaping, parameterised queries)
+- **ISM-1235**: Use parameterised queries for all database operations (never concatenate SQL)
+- **ISM-0988**: Enforce authentication strength appropriate to the application
+- **ISM-1401**: Implement secure session management with appropriate timeouts
+- **ISM-0270**: Encrypt sensitive data at rest (Supabase Vault for secrets)
+- **ISM-0459**: Use TLS for all data in transit
+- **ISM-0585**: Enforce access control at every layer (RLS, middleware, API checks)
+- **ISM-0120**: Log security-relevant events with sufficient detail for investigation
+
+### Platform-Specific Checks
 - **Input validation**: All user inputs validated with Zod schemas at API boundaries
 - **Authentication/authorisation**: JWT verification, RLS policies on all tables, auth middleware on protected routes
 - **Data exposure**: No secrets in client code, no sensitive data in logs, proper error messages (no stack traces)

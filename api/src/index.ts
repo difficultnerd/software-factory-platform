@@ -47,4 +47,12 @@ app.get('/api/me', (c) => {
   return c.json({ userId });
 });
 
-export default app;
+import { recoverStuckFeatures } from './lib/stuck-recovery.js';
+import type { Bindings } from './types.js';
+
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: ScheduledEvent, env: Bindings, _ctx: ExecutionContext) {
+    await recoverStuckFeatures(env);
+  },
+};
