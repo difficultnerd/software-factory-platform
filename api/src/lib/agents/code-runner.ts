@@ -83,7 +83,19 @@ export async function runCodeAgentWithToolUse(params: CodeRunnerParams): Promise
     );
 
     if (!result.ok) {
-      // API error — log and return immediately, no retry
+      // Truncation that couldn't be salvaged — retry with smaller output request
+      if (result.error.includes('truncated') && attempt < MAX_RETRIES) {
+        logger.info({
+          event: 'agent.implementer.truncation_retry',
+          actor: userId,
+          outcome: 'info',
+          metadata: { featureId, attempt, error: result.error },
+        });
+        // Reset messages and retry — the model will try again from scratch
+        messages.length = 1; // keep only the original user prompt
+        continue;
+      }
+      // Genuine API error — log and return immediately, no retry
       await logAgentRun(serviceClient, featureId, userId, 'failed', 0, 0, result.error);
       return { ok: false, error: result.error };
     }
