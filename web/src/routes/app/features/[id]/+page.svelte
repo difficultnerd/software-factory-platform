@@ -14,6 +14,9 @@
     briefMarkdown: string | null;
     specMarkdown: string | null;
     planMarkdown: string | null;
+    testsMarkdown: string | null;
+    securityReviewMarkdown: string | null;
+    codeReviewMarkdown: string | null;
     errorMessage: string | null;
     createdAt: string;
     updatedAt: string;
@@ -43,11 +46,12 @@
       drafting: 'Drafting',
       spec_generating: 'Generating spec',
       spec_ready: 'Spec ready',
-      spec_approved: 'Spec approved',
       plan_generating: 'Generating plan',
       plan_ready: 'Plan ready',
-      plan_approved: 'Plan approved',
-      code_generating: 'Generating code',
+      tests_generating: 'Generating tests',
+      tests_ready: 'Tests ready',
+      implementing: 'Implementing',
+      review: 'Reviewing',
       failed: 'Failed',
       done: 'Done',
     };
@@ -57,15 +61,76 @@
   function statusClasses(status: string): string {
     if (status === 'failed') return 'bg-red-100 text-red-700';
     if (status === 'done') return 'bg-green-100 text-green-700';
+    if (status === 'implementing' || status === 'review') return 'bg-amber-100 text-amber-700';
     if (status.endsWith('_generating')) return 'bg-amber-100 text-amber-700';
     if (status.endsWith('_ready')) return 'bg-blue-100 text-blue-700';
-    if (status.endsWith('_approved')) return 'bg-green-100 text-green-700';
     if (status === 'drafting') return 'bg-slate-100 text-slate-600';
     return 'bg-slate-100 text-slate-600';
   }
 
-  function isGenerating(status: string): boolean {
-    return status.endsWith('_generating');
+  function isProcessing(status: string): boolean {
+    return status.endsWith('_generating') || status === 'implementing' || status === 'review';
+  }
+
+  // Pipeline breadcrumb steps
+  interface PipelineStep {
+    label: string;
+    state: 'completed' | 'active' | 'pending' | 'failed';
+  }
+
+  let pipelineSteps = $derived.by((): PipelineStep[] => {
+    if (!feature) return [];
+    const s = feature.status;
+    const failed = s === 'failed';
+
+    function stepState(completedWhen: boolean, activeStatuses: string[]): PipelineStep['state'] {
+      if (completedWhen && !activeStatuses.includes(s)) return 'completed';
+      if (activeStatuses.includes(s)) return failed ? 'failed' : 'active';
+      if (failed && !completedWhen) return 'failed';
+      return 'pending';
+    }
+
+    return [
+      {
+        label: 'Brief',
+        state: stepState(!!feature.briefMarkdown, ['drafting']),
+      },
+      {
+        label: 'Specification',
+        state: stepState(!!feature.specMarkdown, ['spec_generating', 'spec_ready']),
+      },
+      {
+        label: 'Plan',
+        state: stepState(!!feature.planMarkdown, ['plan_generating', 'plan_ready']),
+      },
+      {
+        label: 'Tests',
+        state: stepState(!!feature.testsMarkdown, ['tests_generating', 'tests_ready']),
+      },
+      {
+        label: 'Code',
+        state: stepState(
+          s === 'review' || s === 'done' || (failed && !!feature.securityReviewMarkdown),
+          ['implementing'],
+        ),
+      },
+      {
+        label: 'Review',
+        state: stepState(s === 'done', ['review']),
+      },
+    ];
+  });
+
+  // Determine which deliverables to show as collapsible sections
+  const statusOrder = ['drafting', 'spec_generating', 'spec_ready', 'plan_generating', 'plan_ready', 'tests_generating', 'tests_ready', 'implementing', 'review', 'done', 'failed'];
+
+  function isPast(current: string, threshold: string): boolean {
+    const ci = statusOrder.indexOf(current);
+    const ti = statusOrder.indexOf(threshold);
+    if (ci === -1 || ti === -1) return false;
+    // For failed status, show all available deliverables
+    if (current === 'failed') return true;
+    return ci > ti;
   }
 
   async function loadFeature() {
@@ -80,8 +145,8 @@
 
     if (result.data) {
       feature = result.data.feature;
-      // If status changed away from generating, stop polling
-      if (feature && !isGenerating(feature.status) && pollTimer) {
+      // If status changed away from processing, stop polling
+      if (feature && !isProcessing(feature.status) && pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
       }
@@ -103,7 +168,7 @@
 
   // Start/stop polling based on status
   $effect(() => {
-    if (feature && isGenerating(feature.status) && !pollTimer) {
+    if (feature && isProcessing(feature.status) && !pollTimer) {
       pollTimer = setInterval(() => {
         loadFeature();
       }, 3000);
@@ -124,7 +189,6 @@
     if (result.error) {
       error = result.error;
     } else {
-      // Reload to get updated status
       await loadFeature();
     }
     approving = false;
@@ -137,6 +201,25 @@
 
     const result = await apiFetch<{ success: boolean }>(
       `/api/features/${feature.id}/approve-plan`,
+      getToken(),
+      { method: 'POST' },
+    );
+
+    if (result.error) {
+      error = result.error;
+    } else {
+      await loadFeature();
+    }
+    approving = false;
+  }
+
+  async function approveTests() {
+    if (!feature) return;
+    approving = true;
+    error = '';
+
+    const result = await apiFetch<{ success: boolean }>(
+      `/api/features/${feature.id}/approve-tests`,
       getToken(),
       { method: 'POST' },
     );
@@ -237,7 +320,7 @@
       <h1 class="text-2xl font-bold text-slate-900">{feature.title}</h1>
       <div class="flex items-center gap-3 ml-4">
         <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium {statusClasses(feature.status)}">
-          {#if isGenerating(feature.status)}
+          {#if isProcessing(feature.status)}
             <span class="w-2 h-2 rounded-full bg-current animate-pulse"></span>
           {/if}
           {statusLabel(feature.status)}
@@ -251,6 +334,132 @@
           {deletingFeature ? 'Deleting...' : 'Delete'}
         </button>
       </div>
+    </div>
+
+    <!-- Breadcrumb trail -->
+    {#if feature.status !== 'drafting'}
+      <nav class="mb-6 bg-white rounded-xl border border-slate-200 px-6 py-4">
+        <ol class="flex items-center gap-0">
+          {#each pipelineSteps as step, i}
+            <li class="flex items-center {i < pipelineSteps.length - 1 ? 'flex-1' : ''}">
+              <div class="flex flex-col items-center gap-1">
+                <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold
+                  {step.state === 'completed' ? 'bg-green-500 text-white' :
+                   step.state === 'active' ? 'bg-brand-600 text-white' :
+                   step.state === 'failed' ? 'bg-red-500 text-white' :
+                   'bg-slate-200 text-slate-500'}">
+                  {#if step.state === 'completed'}
+                    <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                  {:else if step.state === 'failed'}
+                    <svg class="w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  {:else}
+                    {i + 1}
+                  {/if}
+                </div>
+                <span class="text-xs font-medium
+                  {step.state === 'completed' ? 'text-green-700' :
+                   step.state === 'active' ? 'text-brand-700' :
+                   step.state === 'failed' ? 'text-red-700' :
+                   'text-slate-400'}">
+                  {step.label}
+                </span>
+              </div>
+              {#if i < pipelineSteps.length - 1}
+                <div class="flex-1 h-0.5 mx-2 mt-[-1rem]
+                  {pipelineSteps[i + 1].state === 'completed' || pipelineSteps[i + 1].state === 'active' ? 'bg-green-300' :
+                   pipelineSteps[i + 1].state === 'failed' ? 'bg-red-300' :
+                   'bg-slate-200'}">
+                </div>
+              {/if}
+            </li>
+          {/each}
+        </ol>
+      </nav>
+    {/if}
+
+    <!-- Previous deliverables (collapsible) -->
+    <div class="space-y-2 mb-4">
+      {#if feature.briefMarkdown && isPast(feature.status, 'drafting')}
+        <details class="bg-white rounded-xl border border-slate-200">
+          <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+            View brief
+          </summary>
+          <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+            <div class="prose prose-sm prose-slate max-w-none">
+              {@html renderMarkdown(feature.briefMarkdown)}
+            </div>
+          </div>
+        </details>
+      {/if}
+
+      {#if feature.specMarkdown && isPast(feature.status, 'spec_ready')}
+        <details class="bg-white rounded-xl border border-slate-200">
+          <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+            View specification
+          </summary>
+          <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+            <div class="prose prose-sm prose-slate max-w-none">
+              {@html renderMarkdown(feature.specMarkdown)}
+            </div>
+          </div>
+        </details>
+      {/if}
+
+      {#if feature.planMarkdown && isPast(feature.status, 'plan_ready')}
+        <details class="bg-white rounded-xl border border-slate-200">
+          <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+            View implementation plan
+          </summary>
+          <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+            <div class="prose prose-sm prose-slate max-w-none">
+              {@html renderMarkdown(feature.planMarkdown)}
+            </div>
+          </div>
+        </details>
+      {/if}
+
+      {#if feature.testsMarkdown && isPast(feature.status, 'tests_ready')}
+        <details class="bg-white rounded-xl border border-slate-200">
+          <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+            View test contracts
+          </summary>
+          <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+            <div class="prose prose-sm prose-slate max-w-none">
+              {@html renderMarkdown(feature.testsMarkdown)}
+            </div>
+          </div>
+        </details>
+      {/if}
+
+      {#if feature.securityReviewMarkdown}
+        <details class="bg-white rounded-xl border border-slate-200">
+          <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+            View security review
+          </summary>
+          <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+            <div class="prose prose-sm prose-slate max-w-none">
+              {@html renderMarkdown(feature.securityReviewMarkdown)}
+            </div>
+          </div>
+        </details>
+      {/if}
+
+      {#if feature.codeReviewMarkdown}
+        <details class="bg-white rounded-xl border border-slate-200">
+          <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+            View code review
+          </summary>
+          <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+            <div class="prose prose-sm prose-slate max-w-none">
+              {@html renderMarkdown(feature.codeReviewMarkdown)}
+            </div>
+          </div>
+        </details>
+      {/if}
     </div>
 
     <!-- Status-specific content -->
@@ -278,7 +487,6 @@
       </div>
 
     {:else if feature.status === 'spec_ready'}
-      <!-- Spec display + approve button -->
       <div class="space-y-4">
         <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <p class="text-sm text-blue-800 font-medium">Specification ready for review</p>
@@ -308,51 +516,23 @@
         </div>
       </div>
 
-    {:else if feature.status === 'spec_approved' || feature.status === 'plan_generating'}
-      <div class="space-y-4">
-        {#if feature.specMarkdown}
-          <details class="bg-white rounded-xl border border-slate-200">
-            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
-              View specification
-            </summary>
-            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none">
-                {@html renderMarkdown(feature.specMarkdown)}
-              </div>
-            </div>
-          </details>
-        {/if}
-
-        <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
-          <div class="inline-flex items-center gap-3 text-amber-700">
-            <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            <p class="text-sm font-medium">Generating implementation plan...</p>
-          </div>
-          <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
+    {:else if feature.status === 'plan_generating'}
+      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
+        <div class="inline-flex items-center gap-3 text-amber-700">
+          <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p class="text-sm font-medium">Generating implementation plan...</p>
         </div>
+        <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
       </div>
 
     {:else if feature.status === 'plan_ready'}
       <div class="space-y-4">
-        {#if feature.specMarkdown}
-          <details class="bg-white rounded-xl border border-slate-200">
-            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
-              View specification
-            </summary>
-            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none">
-                {@html renderMarkdown(feature.specMarkdown)}
-              </div>
-            </div>
-          </details>
-        {/if}
-
         <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
           <p class="text-sm text-blue-800 font-medium">Implementation plan ready for review</p>
-          <p class="mt-1 text-sm text-blue-700">Review the plan below, then approve to begin code generation.</p>
+          <p class="mt-1 text-sm text-blue-700">Review the plan below, then approve to generate test contracts.</p>
         </div>
 
         <div class="bg-white rounded-xl border border-slate-200 p-6">
@@ -367,79 +547,73 @@
             disabled={approving}
             class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {approving ? 'Generating code...' : 'Approve plan'}
+            {approving ? 'Generating tests...' : 'Approve plan'}
           </button>
         </div>
       </div>
 
-    {:else if feature.status === 'plan_approved' || feature.status === 'code_generating'}
-      <div class="space-y-4">
-        {#if feature.specMarkdown}
-          <details class="bg-white rounded-xl border border-slate-200">
-            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
-              View specification
-            </summary>
-            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none">
-                {@html renderMarkdown(feature.specMarkdown)}
-              </div>
-            </div>
-          </details>
-        {/if}
-
-        {#if feature.planMarkdown}
-          <details class="bg-white rounded-xl border border-slate-200">
-            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
-              View implementation plan
-            </summary>
-            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none">
-                {@html renderMarkdown(feature.planMarkdown)}
-              </div>
-            </div>
-          </details>
-        {/if}
-
-        <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
-          <div class="inline-flex items-center gap-3 text-amber-700">
-            <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            <p class="text-sm font-medium">Generating code...</p>
-          </div>
-          <p class="mt-3 text-xs text-slate-400">This usually takes 60-90 seconds.</p>
+    {:else if feature.status === 'tests_generating'}
+      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
+        <div class="inline-flex items-center gap-3 text-amber-700">
+          <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p class="text-sm font-medium">Generating test contracts...</p>
         </div>
+        <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
+      </div>
+
+    {:else if feature.status === 'tests_ready'}
+      <div class="space-y-4">
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <p class="text-sm text-blue-800 font-medium">Test contracts ready for review</p>
+          <p class="mt-1 text-sm text-blue-700">Review the test contracts below, then approve to begin code generation and automated review.</p>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 p-6">
+          <div class="prose prose-sm prose-slate max-w-none">
+            {@html renderMarkdown(feature.testsMarkdown ?? '')}
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <button
+            onclick={approveTests}
+            disabled={approving}
+            class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {approving ? 'Generating code...' : 'Approve tests'}
+          </button>
+        </div>
+      </div>
+
+    {:else if feature.status === 'implementing'}
+      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
+        <div class="inline-flex items-center gap-3 text-amber-700">
+          <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p class="text-sm font-medium">Generating code...</p>
+        </div>
+        <p class="mt-3 text-xs text-slate-400">This usually takes 60-90 seconds.</p>
+      </div>
+
+    {:else if feature.status === 'review'}
+      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
+        <div class="inline-flex items-center gap-3 text-amber-700">
+          <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <p class="text-sm font-medium">Running security and code review...</p>
+        </div>
+        <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
       </div>
 
     {:else if feature.status === 'done'}
       <div class="space-y-4">
-        {#if feature.specMarkdown}
-          <details class="bg-white rounded-xl border border-slate-200">
-            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
-              View specification
-            </summary>
-            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none">
-                {@html renderMarkdown(feature.specMarkdown)}
-              </div>
-            </div>
-          </details>
-        {/if}
-
-        {#if feature.planMarkdown}
-          <details class="bg-white rounded-xl border border-slate-200">
-            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
-              View implementation plan
-            </summary>
-            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
-              <div class="prose prose-sm prose-slate max-w-none">
-                {@html renderMarkdown(feature.planMarkdown)}
-              </div>
-            </div>
-          </details>
-        {/if}
-
         {#if feature.errorMessage}
           <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
             <p class="text-sm text-amber-800 font-medium">Partial result</p>
@@ -450,7 +624,7 @@
         <div class="bg-green-50 border border-green-200 rounded-lg p-6 text-center">
           <p class="text-sm text-green-800 font-medium">Code generated successfully</p>
           <p class="mt-1 text-sm text-green-700">
-            Your code is ready to download as a zip file.
+            Your code has passed security and code review. Download it as a zip file.
           </p>
           <button
             onclick={downloadCode}

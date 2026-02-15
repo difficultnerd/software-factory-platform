@@ -24,11 +24,12 @@
       drafting: 'Drafting',
       spec_generating: 'Generating spec',
       spec_ready: 'Spec ready',
-      spec_approved: 'Spec approved',
       plan_generating: 'Generating plan',
       plan_ready: 'Plan ready',
-      plan_approved: 'Plan approved',
-      code_generating: 'Generating code',
+      tests_generating: 'Generating tests',
+      tests_ready: 'Tests ready',
+      implementing: 'Implementing',
+      review: 'Reviewing',
       failed: 'Failed',
       done: 'Done',
     };
@@ -37,16 +38,16 @@
 
   function statusClasses(status: string): string {
     if (status === 'failed') return 'bg-red-100 text-red-700';
-    if (status === 'done' || status === 'plan_approved') return 'bg-green-100 text-green-700';
+    if (status === 'done') return 'bg-green-100 text-green-700';
+    if (status === 'implementing' || status === 'review') return 'bg-amber-100 text-amber-700';
     if (status.endsWith('_generating')) return 'bg-amber-100 text-amber-700';
     if (status.endsWith('_ready')) return 'bg-blue-100 text-blue-700';
-    if (status.endsWith('_approved')) return 'bg-green-100 text-green-700';
     if (status === 'drafting') return 'bg-slate-100 text-slate-600';
     return 'bg-slate-100 text-slate-600';
   }
 
-  function isGenerating(status: string): boolean {
-    return status.endsWith('_generating');
+  function isProcessing(status: string): boolean {
+    return status.endsWith('_generating') || status === 'implementing' || status === 'review';
   }
 
   function formatDate(dateStr: string): string {
@@ -202,7 +203,7 @@
             <p class="mt-1 text-xs text-slate-400">{formatDate(feature.created_at)}</p>
           </a>
           <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap {statusClasses(feature.status)}">
-            {#if isGenerating(feature.status)}
+            {#if isProcessing(feature.status)}
               <span class="w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
             {/if}
             {statusLabel(feature.status)}

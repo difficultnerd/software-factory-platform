@@ -1,7 +1,7 @@
 /**
  * @file Features routes
- * @purpose Handles feature lifecycle: list, detail, confirm brief, approve spec/plan
- * @invariants RLS enforces ownership; status transitions validated; agents run via waitUntil
+ * @purpose Handles feature lifecycle: list, detail, confirm brief, approve spec/plan/tests, review pipeline
+ * @invariants RLS enforces ownership; status transitions validated; agents run inline
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -13,7 +13,11 @@ import { runAgent } from '../lib/agents/runner.js';
 import { callCompletion } from '../lib/anthropic.js';
 import { getSpecSystemPrompt, getSpecUserPrompt } from '../lib/agents/spec-prompt.js';
 import { getPlanSystemPrompt, getPlanUserPrompt } from '../lib/agents/plan-prompt.js';
-import { getCodeSystemPrompt, getCodeUserPrompt } from '../lib/agents/code-prompt.js';
+import { getTestSystemPrompt, getTestUserPrompt } from '../lib/agents/test-prompt.js';
+import { getSecurityReviewSystemPrompt, getSecurityReviewUserPrompt } from '../lib/agents/security-review-prompt.js';
+import { getCodeReviewSystemPrompt, getCodeReviewUserPrompt } from '../lib/agents/code-review-prompt.js';
+import { runCodeAgentWithToolUse } from '../lib/agents/code-runner.js';
+import type { CodeFile } from '../lib/agents/code-runner.js';
 import { zipSync, strToU8 } from 'fflate';
 
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -66,7 +70,7 @@ features.get('/:id', async (c) => {
 
   const { data, error: fetchError } = await authClient
     .from('features')
-    .select('id, title, status, brief_markdown, spec_markdown, plan_markdown, error_message, created_at, updated_at')
+    .select('id, title, status, brief_markdown, spec_markdown, plan_markdown, tests_markdown, security_review_markdown, code_review_markdown, error_message, created_at, updated_at')
     .eq('id', featureId)
     .single();
 
@@ -81,6 +85,9 @@ features.get('/:id', async (c) => {
     brief_markdown: string | null;
     spec_markdown: string | null;
     plan_markdown: string | null;
+    tests_markdown: string | null;
+    security_review_markdown: string | null;
+    code_review_markdown: string | null;
     error_message: string | null;
     created_at: string;
     updated_at: string;
@@ -96,6 +103,9 @@ features.get('/:id', async (c) => {
       briefMarkdown: feature.brief_markdown,
       specMarkdown: feature.spec_markdown,
       planMarkdown: feature.plan_markdown,
+      testsMarkdown: feature.tests_markdown,
+      securityReviewMarkdown: feature.security_review_markdown,
+      codeReviewMarkdown: feature.code_review_markdown,
       errorMessage: feature.error_message,
       createdAt: feature.created_at,
       updatedAt: feature.updated_at,
@@ -245,7 +255,7 @@ features.post('/:id/approve-spec', async (c) => {
     return c.json({ error: 'Feature specification is not ready for approval' }, 409);
   }
 
-  // Transition: spec_ready -> spec_approved -> plan_generating
+  // Transition: spec_ready -> plan_generating
   const serviceClient = createServiceClient(c.env);
   const { error: updateError } = await serviceClient
     .from('features')
@@ -275,7 +285,7 @@ features.post('/:id/approve-spec', async (c) => {
   return c.json({ success: true });
 });
 
-// Approve plan and trigger code generation
+// Approve plan and trigger test contract generation
 features.post('/:id/approve-plan', async (c) => {
   const userId = c.get('userId');
   const featureId = c.req.param('id');
@@ -306,7 +316,7 @@ features.post('/:id/approve-plan', async (c) => {
   const serviceClient = createServiceClient(c.env);
   const { error: updateError } = await serviceClient
     .from('features')
-    .update({ status: 'code_generating' })
+    .update({ status: 'tests_generating' })
     .eq('id', featureId);
 
   if (updateError) {
@@ -326,8 +336,65 @@ features.post('/:id/approve-plan', async (c) => {
     metadata: { featureId },
   });
 
-  // Run code agent inline
-  await runCodeAgent(c.env, userId, featureId, f.spec_markdown ?? '', f.plan_markdown ?? '');
+  // Run contract test agent inline
+  await runTestAgent(c.env, userId, featureId, f.spec_markdown ?? '', f.plan_markdown ?? '');
+
+  return c.json({ success: true });
+});
+
+// Approve tests and trigger implementation + review pipeline
+features.post('/:id/approve-tests', async (c) => {
+  const userId = c.get('userId');
+  const featureId = c.req.param('id');
+
+  if (!uuidRegex.test(featureId)) {
+    return c.json({ error: 'Invalid feature ID' }, 400);
+  }
+
+  const accessToken = c.req.header('Authorization')!.slice(7);
+  const authClient = createAuthenticatedClient(c.env, accessToken);
+
+  const { data: feature, error: fetchError } = await authClient
+    .from('features')
+    .select('id, status, spec_markdown, plan_markdown')
+    .eq('id', featureId)
+    .single();
+
+  if (fetchError || !feature) {
+    return c.json({ error: 'Feature not found' }, 404);
+  }
+
+  const f = feature as { id: string; status: string; spec_markdown: string | null; plan_markdown: string | null };
+
+  if (f.status !== 'tests_ready') {
+    return c.json({ error: 'Test contracts are not ready for approval' }, 409);
+  }
+
+  const serviceClient = createServiceClient(c.env);
+  const { error: updateError } = await serviceClient
+    .from('features')
+    .update({ status: 'implementing' })
+    .eq('id', featureId);
+
+  if (updateError) {
+    logger.error({
+      event: 'features.approve_tests',
+      actor: userId,
+      outcome: 'failure',
+      metadata: { featureId, error: updateError.message },
+    });
+    return c.json({ error: 'Failed to update feature status' }, 500);
+  }
+
+  logger.info({
+    event: 'features.approve_tests',
+    actor: userId,
+    outcome: 'success',
+    metadata: { featureId },
+  });
+
+  // Run implementation + review pipeline inline
+  await runImplementAndReviewPipeline(c.env, userId, featureId, f.spec_markdown ?? '', f.plan_markdown ?? '');
 
   return c.json({ success: true });
 });
@@ -407,7 +474,39 @@ features.get('/:id/download', async (c) => {
   });
 });
 
-// Background task: run spec agent
+// --- Helper: read API key from Vault ---
+
+async function readApiKey(
+  serviceClient: ReturnType<typeof createServiceClient>,
+  userId: string,
+  featureId: string,
+  agentLabel: string,
+): Promise<string | null> {
+  const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
+    'read_user_secret',
+    { p_user_id: userId, p_name: 'anthropic_key' },
+  );
+
+  if (vaultError || !apiKeyData) {
+    logger.error({
+      event: `agent.${agentLabel}.vault_read`,
+      actor: userId,
+      outcome: 'failure',
+      metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
+    });
+    await serviceClient
+      .from('features')
+      .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
+      .eq('id', featureId);
+    return null;
+  }
+
+  return String(apiKeyData);
+}
+
+// --- Agent runners ---
+
+// Run spec agent
 async function runSpecAgent(
   env: AppEnv['Bindings'],
   userId: string,
@@ -418,27 +517,8 @@ async function runSpecAgent(
   const serviceClient = createServiceClient(env);
 
   try {
-    // Read API key from Vault
-    const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
-      'read_user_secret',
-      { p_user_id: userId, p_name: 'anthropic_key' },
-    );
-
-    if (vaultError || !apiKeyData) {
-      logger.error({
-        event: 'agent.spec.vault_read',
-        actor: userId,
-        outcome: 'failure',
-        metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
-      });
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
-        .eq('id', featureId);
-      return;
-    }
-
-    const apiKey = String(apiKeyData);
+    const apiKey = await readApiKey(serviceClient, userId, featureId, 'spec');
+    if (!apiKey) return;
 
     const result = await runAgent({
       agentName: 'spec',
@@ -502,217 +582,7 @@ async function runSpecAgent(
   }
 }
 
-/**
- * Extracts complete {path, content} objects from a truncated JSON array.
- * Walks the string tracking brace depth and string state to find objects
- * that were fully closed before the truncation point.
- */
-function salvageJsonArray(text: string): Array<{ path: string; content: string }> {
-  // Find the opening bracket
-  const start = text.indexOf('[');
-  if (start === -1) return [];
-
-  const results: Array<{ path: string; content: string }> = [];
-  let i = start + 1;
-  let objectStart = -1;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-
-  while (i < text.length) {
-    const ch = text[i];
-
-    if (escape) {
-      escape = false;
-      i++;
-      continue;
-    }
-
-    if (ch === '\\' && inString) {
-      escape = true;
-      i++;
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = !inString;
-      i++;
-      continue;
-    }
-
-    if (inString) {
-      i++;
-      continue;
-    }
-
-    if (ch === '{') {
-      if (depth === 0) {
-        objectStart = i;
-      }
-      depth++;
-    } else if (ch === '}') {
-      depth--;
-      if (depth === 0 && objectStart !== -1) {
-        const objectText = text.slice(objectStart, i + 1);
-        try {
-          const obj = JSON.parse(objectText) as { path?: string; content?: string };
-          if (typeof obj.path === 'string' && typeof obj.content === 'string') {
-            results.push({ path: obj.path, content: obj.content });
-          }
-        } catch {
-          // Skip malformed objects
-        }
-        objectStart = -1;
-      }
-    }
-
-    i++;
-  }
-
-  return results;
-}
-
-// Background task: run code agent
-async function runCodeAgent(
-  env: AppEnv['Bindings'],
-  userId: string,
-  featureId: string,
-  specMarkdown: string,
-  planMarkdown: string,
-): Promise<void> {
-  const serviceClient = createServiceClient(env);
-
-  try {
-    // Read API key from Vault
-    const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
-      'read_user_secret',
-      { p_user_id: userId, p_name: 'anthropic_key' },
-    );
-
-    if (vaultError || !apiKeyData) {
-      logger.error({
-        event: 'agent.implementer.vault_read',
-        actor: userId,
-        outcome: 'failure',
-        metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
-      });
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
-        .eq('id', featureId);
-      return;
-    }
-
-    const apiKey = String(apiKeyData);
-
-    const result = await runAgent({
-      agentName: 'implementer',
-      featureId,
-      userId,
-      apiKey,
-      systemPrompt: getCodeSystemPrompt(),
-      userPrompt: getCodeUserPrompt(specMarkdown, planMarkdown),
-      env,
-      maxTokens: 64000,
-    });
-
-    if (result.ok) {
-      // Parse JSON output into file array
-      let files: Array<{ path: string; content: string }>;
-      let wasTruncated = false;
-      try {
-        // Strip markdown fences if the model wrapped the output
-        let jsonText = result.text.trim();
-        if (jsonText.startsWith('```')) {
-          jsonText = jsonText.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
-        }
-        files = JSON.parse(jsonText) as Array<{ path: string; content: string }>;
-        if (!Array.isArray(files) || files.length === 0) {
-          throw new Error('Expected a non-empty array of file objects');
-        }
-      } catch (parseErr) {
-        // If output was truncated due to max_tokens, try to salvage complete objects
-        if (result.stopReason === 'max_tokens') {
-          const salvaged = salvageJsonArray(result.text);
-          if (salvaged.length > 0) {
-            files = salvaged;
-            wasTruncated = true;
-            logger.info({
-              event: 'agent.implementer.salvage',
-              actor: userId,
-              outcome: 'success',
-              metadata: { featureId, salvaged: salvaged.length },
-            });
-          } else {
-            await serviceClient
-              .from('features')
-              .update({ status: 'failed', error_message: 'Code generation output was truncated and no complete files could be recovered. Please try again with a simpler feature.' })
-              .eq('id', featureId);
-            return;
-          }
-        } else {
-          const message = parseErr instanceof Error ? parseErr.message : 'Failed to parse code output';
-          logger.error({
-            event: 'agent.implementer.parse',
-            actor: userId,
-            outcome: 'failure',
-            metadata: { featureId, error: message },
-          });
-          await serviceClient
-            .from('features')
-            .update({ status: 'failed', error_message: `Code generation produced invalid output: ${message}` })
-            .eq('id', featureId);
-          return;
-        }
-      }
-
-      // Upload each file to R2 and record in artifacts table
-      for (const file of files) {
-        const r2Key = `${userId}/${featureId}/${file.path}`;
-        await env.ARTIFACTS.put(r2Key, file.content);
-
-        await serviceClient.from('artifacts').insert({
-          feature_id: featureId,
-          user_id: userId,
-          file_path: file.path,
-          r2_key: r2Key,
-          size_bytes: new TextEncoder().encode(file.content).byteLength,
-        });
-      }
-
-      const updateFields: Record<string, string> = { status: 'done' };
-      if (wasTruncated) {
-        updateFields.error_message = `Output was truncated: ${files.length} complete file(s) were recovered, but some files may be missing. You can download what was generated and try again if needed.`;
-      }
-
-      await serviceClient
-        .from('features')
-        .update(updateFields)
-        .eq('id', featureId);
-    } else {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: result.error })
-        .eq('id', featureId);
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error in code agent';
-    logger.error({
-      event: 'agent.implementer.crash',
-      actor: userId,
-      outcome: 'failure',
-      metadata: { featureId, error: message },
-    });
-    try {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: `Code agent error: ${message}` })
-        .eq('id', featureId);
-    } catch { /* last resort — nothing more we can do */ }
-  }
-}
-
-// Background task: run plan agent
+// Run plan agent
 async function runPlanAgent(
   env: AppEnv['Bindings'],
   userId: string,
@@ -722,27 +592,8 @@ async function runPlanAgent(
   const serviceClient = createServiceClient(env);
 
   try {
-    // Read API key from Vault
-    const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
-      'read_user_secret',
-      { p_user_id: userId, p_name: 'anthropic_key' },
-    );
-
-    if (vaultError || !apiKeyData) {
-      logger.error({
-        event: 'agent.planner.vault_read',
-        actor: userId,
-        outcome: 'failure',
-        metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
-      });
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
-        .eq('id', featureId);
-      return;
-    }
-
-    const apiKey = String(apiKeyData);
+    const apiKey = await readApiKey(serviceClient, userId, featureId, 'planner');
+    if (!apiKey) return;
 
     const result = await runAgent({
       agentName: 'planner',
@@ -780,4 +631,199 @@ async function runPlanAgent(
         .eq('id', featureId);
     } catch { /* last resort — nothing more we can do */ }
   }
+}
+
+// Run contract test agent
+async function runTestAgent(
+  env: AppEnv['Bindings'],
+  userId: string,
+  featureId: string,
+  specMarkdown: string,
+  planMarkdown: string,
+): Promise<void> {
+  const serviceClient = createServiceClient(env);
+
+  try {
+    const apiKey = await readApiKey(serviceClient, userId, featureId, 'contract_test');
+    if (!apiKey) return;
+
+    const result = await runAgent({
+      agentName: 'contract_test',
+      featureId,
+      userId,
+      apiKey,
+      systemPrompt: getTestSystemPrompt(),
+      userPrompt: getTestUserPrompt(specMarkdown, planMarkdown),
+      env,
+    });
+
+    if (result.ok) {
+      await serviceClient
+        .from('features')
+        .update({ tests_markdown: result.text, status: 'tests_ready' })
+        .eq('id', featureId);
+    } else {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: result.error })
+        .eq('id', featureId);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error in test agent';
+    logger.error({
+      event: 'agent.contract_test.crash',
+      actor: userId,
+      outcome: 'failure',
+      metadata: { featureId, error: message },
+    });
+    try {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: `Test agent error: ${message}` })
+        .eq('id', featureId);
+    } catch { /* last resort — nothing more we can do */ }
+  }
+}
+
+// Run full implementation + review pipeline (implementing -> review -> done/failed)
+async function runImplementAndReviewPipeline(
+  env: AppEnv['Bindings'],
+  userId: string,
+  featureId: string,
+  specMarkdown: string,
+  planMarkdown: string,
+): Promise<void> {
+  const serviceClient = createServiceClient(env);
+
+  try {
+    const apiKey = await readApiKey(serviceClient, userId, featureId, 'implementer');
+    if (!apiKey) return;
+
+    // Step 1: Run code agent
+    const codeResult = await runCodeAgentWithToolUse({
+      featureId,
+      userId,
+      apiKey,
+      specMarkdown,
+      planMarkdown,
+      env,
+    });
+
+    if (!codeResult.ok) {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: codeResult.error })
+        .eq('id', featureId);
+      return;
+    }
+
+    // Upload each file to R2 and record in artifacts table
+    for (const file of codeResult.files) {
+      const r2Key = `${userId}/${featureId}/${file.path}`;
+      await env.ARTIFACTS.put(r2Key, file.content);
+
+      await serviceClient.from('artifacts').insert({
+        feature_id: featureId,
+        user_id: userId,
+        file_path: file.path,
+        r2_key: r2Key,
+        size_bytes: new TextEncoder().encode(file.content).byteLength,
+        artifact_type: 'implementation',
+      });
+    }
+
+    // Transition to review
+    const reviewUpdate: Record<string, string> = { status: 'review' };
+    if (codeResult.wasTruncated) {
+      reviewUpdate.error_message = `Output was truncated: ${codeResult.files.length} complete file(s) were recovered, but some files may be missing.`;
+    }
+    await serviceClient
+      .from('features')
+      .update(reviewUpdate)
+      .eq('id', featureId);
+
+    // Step 2: Run security review
+    const securityResult = await runAgent({
+      agentName: 'security_review',
+      featureId,
+      userId,
+      apiKey,
+      systemPrompt: getSecurityReviewSystemPrompt(),
+      userPrompt: getSecurityReviewUserPrompt(codeResult.files),
+      env,
+    });
+
+    if (securityResult.ok) {
+      await serviceClient
+        .from('features')
+        .update({ security_review_markdown: securityResult.text })
+        .eq('id', featureId);
+    }
+
+    // Step 3: Run code review
+    const codeReviewResult = await runAgent({
+      agentName: 'code_review',
+      featureId,
+      userId,
+      apiKey,
+      systemPrompt: getCodeReviewSystemPrompt(),
+      userPrompt: getCodeReviewUserPrompt(specMarkdown, planMarkdown, codeResult.files),
+      env,
+    });
+
+    if (codeReviewResult.ok) {
+      await serviceClient
+        .from('features')
+        .update({ code_review_markdown: codeReviewResult.text })
+        .eq('id', featureId);
+    }
+
+    // Step 4: Parse verdicts and determine final status
+    const securityVerdict = securityResult.ok ? parseVerdict(securityResult.text) : 'FAIL';
+    const codeReviewVerdict = codeReviewResult.ok ? parseVerdict(codeReviewResult.text) : 'FAIL';
+
+    if (securityVerdict === 'PASS' && codeReviewVerdict === 'PASS') {
+      await serviceClient
+        .from('features')
+        .update({ status: 'done' })
+        .eq('id', featureId);
+    } else {
+      const failures: string[] = [];
+      if (securityVerdict !== 'PASS') failures.push('security review');
+      if (codeReviewVerdict !== 'PASS') failures.push('code review');
+      await serviceClient
+        .from('features')
+        .update({
+          status: 'failed',
+          error_message: `Review failed: ${failures.join(' and ')} did not pass. See review reports for details.`,
+        })
+        .eq('id', featureId);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error in implementation pipeline';
+    logger.error({
+      event: 'agent.pipeline.crash',
+      actor: userId,
+      outcome: 'failure',
+      metadata: { featureId, error: message },
+    });
+    try {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: `Pipeline error: ${message}` })
+        .eq('id', featureId);
+    } catch { /* last resort — nothing more we can do */ }
+  }
+}
+
+// Extract VERDICT: PASS or VERDICT: FAIL from the last lines of agent output
+function parseVerdict(text: string): 'PASS' | 'FAIL' {
+  const lines = text.trim().split('\n');
+  // Check last few lines for the verdict
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
+    const line = lines[i]?.trim();
+    if (line === 'VERDICT: PASS') return 'PASS';
+    if (line === 'VERDICT: FAIL') return 'FAIL';
+  }
+  return 'FAIL'; // Default to fail if verdict not found
 }
