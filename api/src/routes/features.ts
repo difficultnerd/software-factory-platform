@@ -1,7 +1,7 @@
 /**
  * @file Features routes
- * @purpose Handles feature lifecycle: list, detail, confirm brief, approve spec/plan/tests, review pipeline
- * @invariants RLS enforces ownership; status transitions validated; agents run inline
+ * @purpose Handles feature lifecycle: list, detail, confirm brief, approve spec/plan/tests, download
+ * @invariants RLS enforces ownership; status transitions validated; agents run via queue
  */
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -9,16 +9,7 @@ import type { AppEnv } from '../types.js';
 import { createAuthenticatedClient, createServiceClient } from '../lib/supabase.js';
 import { validateBody } from '../middleware/validation.js';
 import { logger } from '../lib/logger.js';
-import { runAgent } from '../lib/agents/runner.js';
-import { callCompletion } from '../lib/anthropic.js';
-import { getSpecSystemPrompt, getSpecUserPrompt } from '../lib/agents/spec-prompt.js';
-import { getPlanSystemPrompt, getPlanUserPrompt } from '../lib/agents/plan-prompt.js';
-import { getTestSystemPrompt, getTestUserPrompt } from '../lib/agents/test-prompt.js';
-import { getSecurityReviewSystemPrompt, getSecurityReviewUserPrompt } from '../lib/agents/security-review-prompt.js';
-import { getCodeReviewSystemPrompt, getCodeReviewUserPrompt } from '../lib/agents/code-review-prompt.js';
-import { getAlignmentReviewSystemPrompt, getSpecAlignmentUserPrompt, getPlanAlignmentUserPrompt, getTestsAlignmentUserPrompt } from '../lib/agents/alignment-review-prompt.js';
-import { runCodeAgentWithToolUse } from '../lib/agents/code-runner.js';
-import type { CodeFile } from '../lib/agents/code-runner.js';
+import type { PipelineMessage } from '../lib/pipeline.js';
 import { zipSync, strToU8 } from 'fflate';
 
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -227,8 +218,8 @@ features.post('/:id/confirm', validateBody(confirmSchema), async (c) => {
     metadata: { featureId },
   });
 
-  // Run spec agent inline (waitUntil unreliable on this Workers config)
-  await runSpecAgent(c.env, userId, featureId, feature.title, briefMarkdown);
+  // Enqueue spec generation
+  await c.env.PIPELINE_QUEUE.send({ type: 'run_spec', featureId, userId, title: feature.title } satisfies PipelineMessage);
 
   return c.json({ success: true });
 });
@@ -286,8 +277,8 @@ features.post('/:id/approve-spec', async (c) => {
     metadata: { featureId },
   });
 
-  // Run plan agent inline
-  await runPlanAgent(c.env, userId, featureId, f.brief_markdown ?? '', f.spec_markdown ?? '');
+  // Enqueue plan generation
+  await c.env.PIPELINE_QUEUE.send({ type: 'run_plan', featureId, userId } satisfies PipelineMessage);
 
   return c.json({ success: true });
 });
@@ -343,8 +334,8 @@ features.post('/:id/approve-plan', async (c) => {
     metadata: { featureId },
   });
 
-  // Run contract test agent inline
-  await runTestAgent(c.env, userId, featureId, f.brief_markdown ?? '', f.spec_markdown ?? '', f.plan_markdown ?? '');
+  // Enqueue test contract generation
+  await c.env.PIPELINE_QUEUE.send({ type: 'run_tests', featureId, userId } satisfies PipelineMessage);
 
   return c.json({ success: true });
 });
@@ -400,8 +391,8 @@ features.post('/:id/approve-tests', async (c) => {
     metadata: { featureId },
   });
 
-  // Run implementation + review pipeline inline
-  await runImplementAndReviewPipeline(c.env, userId, featureId, f.spec_markdown ?? '', f.plan_markdown ?? '');
+  // Enqueue implementation pipeline
+  await c.env.PIPELINE_QUEUE.send({ type: 'run_implement', featureId, userId } satisfies PipelineMessage);
 
   return c.json({ success: true });
 });
@@ -496,8 +487,8 @@ features.post('/:id/revise', validateBody(confirmSchema), async (c) => {
     metadata: { featureId },
   });
 
-  // Run spec agent inline with revised brief
-  await runSpecAgent(c.env, userId, featureId, f.title, briefMarkdown);
+  // Enqueue spec generation with revised brief
+  await c.env.PIPELINE_QUEUE.send({ type: 'run_spec', featureId, userId, title: f.title } satisfies PipelineMessage);
 
   return c.json({ success: true });
 });
@@ -640,6 +631,55 @@ features.post('/:id/retry', async (c) => {
   return c.json({ success: true, targetStatus });
 });
 
+// Get token usage for a feature
+features.get('/:id/usage', async (c) => {
+  const userId = c.get('userId');
+  const featureId = c.req.param('id');
+
+  if (!uuidRegex.test(featureId)) {
+    return c.json({ error: 'Invalid feature ID' }, 400);
+  }
+
+  const accessToken = c.req.header('Authorization')!.slice(7);
+  const authClient = createAuthenticatedClient(c.env, accessToken);
+
+  // Verify ownership
+  const { data: feature, error: fetchError } = await authClient
+    .from('features')
+    .select('id')
+    .eq('id', featureId)
+    .single();
+
+  if (fetchError || !feature) {
+    return c.json({ error: 'Feature not found' }, 404);
+  }
+
+  const serviceClient = createServiceClient(c.env);
+  const { data: runs, error: runsError } = await serviceClient
+    .from('agent_runs')
+    .select('agent_name, input_tokens, output_tokens')
+    .eq('feature_id', featureId)
+    .eq('user_id', userId)
+    .eq('status', 'success')
+    .order('created_at', { ascending: true });
+
+  if (runsError) {
+    return c.json({ error: 'Failed to load usage data' }, 500);
+  }
+
+  const typedRuns = (runs ?? []) as Array<{ agent_name: string; input_tokens: number; output_tokens: number }>;
+
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  const runsList = typedRuns.map((r) => {
+    totalInputTokens += r.input_tokens;
+    totalOutputTokens += r.output_tokens;
+    return { agentName: r.agent_name, inputTokens: r.input_tokens, outputTokens: r.output_tokens };
+  });
+
+  return c.json({ totalInputTokens, totalOutputTokens, runs: runsList });
+});
+
 // Download generated code as zip
 features.get('/:id/download', async (c) => {
   const userId = c.get('userId');
@@ -715,457 +755,3 @@ features.get('/:id/download', async (c) => {
   });
 });
 
-// --- Helper: read API key from Vault ---
-
-async function readApiKey(
-  serviceClient: ReturnType<typeof createServiceClient>,
-  userId: string,
-  featureId: string,
-  agentLabel: string,
-): Promise<string | null> {
-  const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
-    'read_user_secret',
-    { p_user_id: userId, p_name: 'anthropic_key' },
-  );
-
-  if (vaultError || !apiKeyData) {
-    logger.error({
-      event: `agent.${agentLabel}.vault_read`,
-      actor: userId,
-      outcome: 'failure',
-      metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
-    });
-    await serviceClient
-      .from('features')
-      .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
-      .eq('id', featureId);
-    return null;
-  }
-
-  return String(apiKeyData);
-}
-
-// --- Agent runners ---
-
-// Run spec agent
-async function runSpecAgent(
-  env: AppEnv['Bindings'],
-  userId: string,
-  featureId: string,
-  title: string,
-  briefMarkdown: string,
-): Promise<void> {
-  const serviceClient = createServiceClient(env);
-
-  try {
-    const apiKey = await readApiKey(serviceClient, userId, featureId, 'spec');
-    if (!apiKey) return;
-
-    const result = await runAgent({
-      agentName: 'spec',
-      featureId,
-      userId,
-      apiKey,
-      systemPrompt: getSpecSystemPrompt(),
-      userPrompt: getSpecUserPrompt(briefMarkdown, title),
-      env,
-    });
-
-    if (result.ok) {
-      // Attempt to generate a concise AI title from the spec
-      let aiTitle: string | null = null;
-      try {
-        const titleResult = await callCompletion(
-          apiKey,
-          [{ role: 'user', content: `Summarise what this software feature does in 5-8 words. Reply with ONLY the title, no quotes or punctuation at the end.\n\n${result.text.slice(0, 2000)}` }],
-          'You are a concise technical writer. Respond with only the short title.',
-          50,
-        );
-        if (titleResult.ok && titleResult.text.trim().length > 0) {
-          aiTitle = titleResult.text.trim().slice(0, 200);
-        }
-      } catch {
-        // Non-critical: keep original title if summarisation fails
-      }
-
-      // Run alignment reviewer (non-critical)
-      let specRecommendation: string | null = null;
-      try {
-        const reviewResult = await runAgent({
-          agentName: 'alignment_review',
-          featureId,
-          userId,
-          apiKey,
-          systemPrompt: getAlignmentReviewSystemPrompt(),
-          userPrompt: getSpecAlignmentUserPrompt(briefMarkdown, result.text),
-          env,
-        });
-        if (reviewResult.ok) {
-          specRecommendation = reviewResult.text;
-        }
-      } catch {
-        // Non-critical: proceed without recommendation
-      }
-
-      const updateFields: Record<string, string | null> = {
-        spec_markdown: result.text,
-        status: 'spec_ready',
-        spec_recommendation: specRecommendation,
-      };
-      if (aiTitle) {
-        updateFields.title = aiTitle;
-      }
-
-      const { error: saveError } = await serviceClient
-        .from('features')
-        .update(updateFields)
-        .eq('id', featureId);
-
-      if (saveError) {
-        logger.error({ event: 'agent.spec.save', actor: userId, outcome: 'failure', metadata: { featureId, error: saveError.message } });
-        await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to save specification: ${saveError.message}` }).eq('id', featureId);
-      }
-    } else {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: result.error })
-        .eq('id', featureId);
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error in spec agent';
-    logger.error({
-      event: 'agent.spec.crash',
-      actor: userId,
-      outcome: 'failure',
-      metadata: { featureId, error: message },
-    });
-    try {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: `Spec agent error: ${message}` })
-        .eq('id', featureId);
-    } catch { /* last resort — nothing more we can do */ }
-  }
-}
-
-// Run plan agent
-async function runPlanAgent(
-  env: AppEnv['Bindings'],
-  userId: string,
-  featureId: string,
-  briefMarkdown: string,
-  specMarkdown: string,
-): Promise<void> {
-  const serviceClient = createServiceClient(env);
-
-  try {
-    const apiKey = await readApiKey(serviceClient, userId, featureId, 'planner');
-    if (!apiKey) return;
-
-    const result = await runAgent({
-      agentName: 'planner',
-      featureId,
-      userId,
-      apiKey,
-      systemPrompt: getPlanSystemPrompt(),
-      userPrompt: getPlanUserPrompt(specMarkdown),
-      env,
-    });
-
-    if (result.ok) {
-      // Run alignment reviewer (non-critical)
-      let planRecommendation: string | null = null;
-      try {
-        const reviewResult = await runAgent({
-          agentName: 'alignment_review',
-          featureId,
-          userId,
-          apiKey,
-          systemPrompt: getAlignmentReviewSystemPrompt(),
-          userPrompt: getPlanAlignmentUserPrompt(briefMarkdown, specMarkdown, result.text),
-          env,
-        });
-        if (reviewResult.ok) {
-          planRecommendation = reviewResult.text;
-        }
-      } catch {
-        // Non-critical: proceed without recommendation
-      }
-
-      const { error: saveError } = await serviceClient
-        .from('features')
-        .update({ plan_markdown: result.text, plan_recommendation: planRecommendation, status: 'plan_ready' })
-        .eq('id', featureId);
-
-      if (saveError) {
-        logger.error({ event: 'agent.planner.save', actor: userId, outcome: 'failure', metadata: { featureId, error: saveError.message } });
-        await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to save plan: ${saveError.message}` }).eq('id', featureId);
-      }
-    } else {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: result.error })
-        .eq('id', featureId);
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error in plan agent';
-    logger.error({
-      event: 'agent.planner.crash',
-      actor: userId,
-      outcome: 'failure',
-      metadata: { featureId, error: message },
-    });
-    try {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: `Plan agent error: ${message}` })
-        .eq('id', featureId);
-    } catch { /* last resort — nothing more we can do */ }
-  }
-}
-
-// Run contract test agent
-async function runTestAgent(
-  env: AppEnv['Bindings'],
-  userId: string,
-  featureId: string,
-  briefMarkdown: string,
-  specMarkdown: string,
-  planMarkdown: string,
-): Promise<void> {
-  const serviceClient = createServiceClient(env);
-
-  try {
-    const apiKey = await readApiKey(serviceClient, userId, featureId, 'contract_test');
-    if (!apiKey) return;
-
-    const result = await runAgent({
-      agentName: 'contract_test',
-      featureId,
-      userId,
-      apiKey,
-      systemPrompt: getTestSystemPrompt(),
-      userPrompt: getTestUserPrompt(specMarkdown, planMarkdown),
-      env,
-    });
-
-    if (result.ok) {
-      // Run alignment reviewer (non-critical)
-      let testsRecommendation: string | null = null;
-      try {
-        const reviewResult = await runAgent({
-          agentName: 'alignment_review',
-          featureId,
-          userId,
-          apiKey,
-          systemPrompt: getAlignmentReviewSystemPrompt(),
-          userPrompt: getTestsAlignmentUserPrompt(briefMarkdown, specMarkdown, planMarkdown, result.text),
-          env,
-        });
-        if (reviewResult.ok) {
-          testsRecommendation = reviewResult.text;
-        }
-      } catch {
-        // Non-critical: proceed without recommendation
-      }
-
-      const { error: saveError } = await serviceClient
-        .from('features')
-        .update({ tests_markdown: result.text, tests_recommendation: testsRecommendation, status: 'tests_ready' })
-        .eq('id', featureId);
-
-      if (saveError) {
-        logger.error({ event: 'agent.contract_test.save', actor: userId, outcome: 'failure', metadata: { featureId, error: saveError.message } });
-        await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to save tests: ${saveError.message}` }).eq('id', featureId);
-      }
-    } else {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: result.error })
-        .eq('id', featureId);
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error in test agent';
-    logger.error({
-      event: 'agent.contract_test.crash',
-      actor: userId,
-      outcome: 'failure',
-      metadata: { featureId, error: message },
-    });
-    try {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: `Test agent error: ${message}` })
-        .eq('id', featureId);
-    } catch { /* last resort — nothing more we can do */ }
-  }
-}
-
-// Run full implementation + review pipeline (implementing -> review -> done/failed)
-async function runImplementAndReviewPipeline(
-  env: AppEnv['Bindings'],
-  userId: string,
-  featureId: string,
-  specMarkdown: string,
-  planMarkdown: string,
-): Promise<void> {
-  const serviceClient = createServiceClient(env);
-
-  try {
-    const apiKey = await readApiKey(serviceClient, userId, featureId, 'implementer');
-    if (!apiKey) return;
-
-    // Step 1: Run code agent
-    const codeResult = await runCodeAgentWithToolUse({
-      featureId,
-      userId,
-      apiKey,
-      specMarkdown,
-      planMarkdown,
-      env,
-    });
-
-    if (!codeResult.ok) {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: codeResult.error })
-        .eq('id', featureId);
-      return;
-    }
-
-    // Upload each file to R2 and record in artifacts table
-    for (const file of codeResult.files) {
-      const r2Key = `${userId}/${featureId}/${file.path}`;
-      await env.ARTIFACTS.put(r2Key, file.content);
-
-      const { error: insertError } = await serviceClient.from('artifacts').insert({
-        feature_id: featureId,
-        user_id: userId,
-        file_path: file.path,
-        r2_key: r2Key,
-        size_bytes: new TextEncoder().encode(file.content).byteLength,
-        artifact_type: 'implementation',
-      });
-
-      if (insertError) {
-        logger.error({ event: 'agent.pipeline.artifact_insert', actor: userId, outcome: 'failure', metadata: { featureId, filePath: file.path, error: insertError.message } });
-      }
-    }
-
-    // Transition to review
-    const reviewUpdate: Record<string, string> = { status: 'review' };
-    if (codeResult.wasTruncated) {
-      reviewUpdate.error_message = `Output was truncated: ${codeResult.files.length} complete file(s) were recovered, but some files may be missing.`;
-    }
-    const { error: reviewTransitionError } = await serviceClient
-      .from('features')
-      .update(reviewUpdate)
-      .eq('id', featureId);
-
-    if (reviewTransitionError) {
-      logger.error({ event: 'agent.pipeline.review_transition', actor: userId, outcome: 'failure', metadata: { featureId, error: reviewTransitionError.message } });
-      await serviceClient.from('features').update({ status: 'failed', error_message: `Failed to transition to review: ${reviewTransitionError.message}` }).eq('id', featureId);
-      return;
-    }
-
-    // Step 2: Run security review
-    const securityResult = await runAgent({
-      agentName: 'security_review',
-      featureId,
-      userId,
-      apiKey,
-      systemPrompt: getSecurityReviewSystemPrompt(),
-      userPrompt: getSecurityReviewUserPrompt(codeResult.files),
-      env,
-    });
-
-    if (securityResult.ok) {
-      const { error: secSaveError } = await serviceClient
-        .from('features')
-        .update({ security_review_markdown: securityResult.text })
-        .eq('id', featureId);
-
-      if (secSaveError) {
-        logger.error({ event: 'agent.security_review.save', actor: userId, outcome: 'failure', metadata: { featureId, error: secSaveError.message } });
-      }
-    }
-
-    // Step 3: Run code review
-    const codeReviewResult = await runAgent({
-      agentName: 'code_review',
-      featureId,
-      userId,
-      apiKey,
-      systemPrompt: getCodeReviewSystemPrompt(),
-      userPrompt: getCodeReviewUserPrompt(specMarkdown, planMarkdown, codeResult.files),
-      env,
-    });
-
-    if (codeReviewResult.ok) {
-      const { error: crSaveError } = await serviceClient
-        .from('features')
-        .update({ code_review_markdown: codeReviewResult.text })
-        .eq('id', featureId);
-
-      if (crSaveError) {
-        logger.error({ event: 'agent.code_review.save', actor: userId, outcome: 'failure', metadata: { featureId, error: crSaveError.message } });
-      }
-    }
-
-    // Step 4: Parse verdicts and determine final status
-    const securityVerdict = securityResult.ok ? parseVerdict(securityResult.text) : 'FAIL';
-    const codeReviewVerdict = codeReviewResult.ok ? parseVerdict(codeReviewResult.text) : 'FAIL';
-
-    if (securityVerdict === 'PASS' && codeReviewVerdict === 'PASS') {
-      const { error: doneError } = await serviceClient
-        .from('features')
-        .update({ status: 'done' })
-        .eq('id', featureId);
-
-      if (doneError) {
-        logger.error({ event: 'agent.pipeline.done_transition', actor: userId, outcome: 'failure', metadata: { featureId, error: doneError.message } });
-      }
-    } else {
-      const failures: string[] = [];
-      if (securityVerdict !== 'PASS') failures.push('security review');
-      if (codeReviewVerdict !== 'PASS') failures.push('code review');
-      const { error: failError } = await serviceClient
-        .from('features')
-        .update({
-          status: 'failed',
-          error_message: `Review failed: ${failures.join(' and ')} did not pass. See review reports for details.`,
-        })
-        .eq('id', featureId);
-
-      if (failError) {
-        logger.error({ event: 'agent.pipeline.fail_transition', actor: userId, outcome: 'failure', metadata: { featureId, error: failError.message } });
-      }
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error in implementation pipeline';
-    logger.error({
-      event: 'agent.pipeline.crash',
-      actor: userId,
-      outcome: 'failure',
-      metadata: { featureId, error: message },
-    });
-    try {
-      await serviceClient
-        .from('features')
-        .update({ status: 'failed', error_message: `Pipeline error: ${message}` })
-        .eq('id', featureId);
-    } catch { /* last resort — nothing more we can do */ }
-  }
-}
-
-// Extract VERDICT: PASS or VERDICT: FAIL from the last lines of agent output
-function parseVerdict(text: string): 'PASS' | 'FAIL' {
-  const lines = text.trim().split('\n');
-  // Check last few lines for the verdict
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
-    const line = lines[i]?.trim();
-    if (line === 'VERDICT: PASS') return 'PASS';
-    if (line === 'VERDICT: FAIL') return 'FAIL';
-  }
-  return 'FAIL'; // Default to fail if verdict not found
-}

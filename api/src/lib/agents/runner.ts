@@ -18,6 +18,7 @@ interface RunAgentParams {
   userPrompt: string;
   env: Bindings;
   maxTokens?: number;
+  model?: string;
 }
 
 type RunAgentResult =
@@ -25,7 +26,7 @@ type RunAgentResult =
   | { ok: false; error: string };
 
 export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
-  const { agentName, featureId, userId, apiKey, systemPrompt, userPrompt, env, maxTokens } = params;
+  const { agentName, featureId, userId, apiKey, systemPrompt, userPrompt, env, maxTokens, model } = params;
 
   logger.info({
     event: `agent.${agentName}.start`,
@@ -39,11 +40,43 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     [{ role: 'user', content: userPrompt }],
     systemPrompt,
     maxTokens,
+    model,
   );
 
   const serviceClient = createServiceClient(env);
 
   if (result.ok) {
+    // Detect truncation — treat as failure so pipeline can retry
+    if (result.stopReason === 'max_tokens') {
+      logger.error({
+        event: `agent.${agentName}.truncated`,
+        actor: userId,
+        outcome: 'failure',
+        metadata: { featureId, outputTokens: result.outputTokens },
+      });
+
+      const { error: insertError } = await serviceClient.from('agent_runs').insert({
+        feature_id: featureId,
+        user_id: userId,
+        agent_name: agentName,
+        status: 'failed',
+        error_message: 'Output truncated',
+        input_tokens: result.inputTokens,
+        output_tokens: result.outputTokens,
+      });
+
+      if (insertError) {
+        logger.error({
+          event: `agent.${agentName}.log_run`,
+          actor: userId,
+          outcome: 'failure',
+          metadata: { featureId, error: insertError.message },
+        });
+      }
+
+      return { ok: false, error: 'Agent output was truncated. The response exceeded the maximum length.' };
+    }
+
     // Log successful agent run
     const { error: insertError } = await serviceClient.from('agent_runs').insert({
       feature_id: featureId,

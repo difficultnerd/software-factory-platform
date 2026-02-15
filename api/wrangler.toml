@@ -13,6 +13,17 @@ compatibility_flags = ["nodejs_compat"]
 binding = "ARTIFACTS"
 bucket_name = "buildpractical-artifacts"
 
+# Pipeline queue — agents run as queue consumers (15 min execution limit)
+[[queues.producers]]
+queue = "pipeline-queue"
+binding = "PIPELINE_QUEUE"
+
+[[queues.consumers]]
+queue = "pipeline-queue"
+max_batch_size = 1
+max_retries = 2
+dead_letter_queue = "pipeline-dlq"
+
 # Stuck-task recovery: runs every 15 minutes
 [triggers]
 crons = ["*/15 * * * *"]

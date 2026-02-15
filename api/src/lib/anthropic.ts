@@ -34,6 +34,31 @@ export type ToolCompletionResult =
   | { ok: false; error: string };
 
 /**
+ * Fetch wrapper with retry logic for transient Anthropic errors (429/529).
+ * Uses exponential backoff with retry-after header support.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  maxRetries: number = 3,
+): Promise<Response> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const response = await fetch(url, init);
+    if (response.status === 429 || response.status === 529) {
+      if (attempt === maxRetries) return response;
+      const retryAfter = response.headers.get('retry-after');
+      const delay = retryAfter
+        ? Math.min(parseInt(retryAfter, 10) * 1000, 30000)
+        : Math.min(1000 * Math.pow(2, attempt), 15000);
+      await new Promise(r => setTimeout(r, delay));
+      continue;
+    }
+    return response;
+  }
+  return fetch(url, init);
+}
+
+/**
  * Non-streaming completion that uses streaming internally to avoid
  * Cloudflare 524 timeouts on long-running API calls.
  */
@@ -42,6 +67,7 @@ export async function callCompletion(
   messages: ChatMessage[],
   systemPrompt: string,
   maxTokens?: number,
+  model?: string,
 ): Promise<CompletionResult> {
   let text = '';
   let inputTokens = 0;
@@ -49,7 +75,7 @@ export async function callCompletion(
   let stopReason = 'unknown';
 
   try {
-    for await (const event of streamChatCompletion(apiKey, messages, systemPrompt, maxTokens ?? 8192)) {
+    for await (const event of streamChatCompletion(apiKey, messages, systemPrompt, maxTokens ?? 8192, model)) {
       if (event.type === 'text') {
         text += event.text;
       } else if (event.type === 'done') {
@@ -81,8 +107,9 @@ export async function* streamChatCompletion(
   messages: ChatMessage[],
   systemPrompt: string,
   maxTokens: number = 4096,
+  model: string = 'claude-sonnet-4-5-20250929',
 ): AsyncGenerator<StreamEvent> {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const response = await fetchWithRetry('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -90,7 +117,7 @@ export async function* streamChatCompletion(
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-5-20250929',
+      model,
       max_tokens: maxTokens,
       stream: true,
       system: systemPrompt,
@@ -107,8 +134,8 @@ export async function* streamChatCompletion(
         // Sanitise: don't leak internal Anthropic details, but keep useful info
         if (response.status === 401) {
           errorMessage = 'Invalid API key. Please check your key in Settings.';
-        } else if (response.status === 429) {
-          errorMessage = 'Rate limit exceeded. Please wait a moment and try again.';
+        } else if (response.status === 429 || response.status === 529) {
+          errorMessage = 'The AI service is temporarily busy. Please try again in a few minutes.';
         } else if (response.status === 400) {
           errorMessage = 'Request error. Please try again with a shorter message.';
         }
@@ -218,17 +245,23 @@ export async function callToolCompletion(
   tools: ToolDefinition[],
   maxTokens: number,
   toolChoice?: { type: 'tool'; name: string } | { type: 'auto' },
+  model: string = 'claude-sonnet-4-5-20250929',
 ): Promise<ToolCompletionResult> {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+  };
+  // output-128k beta only applies to Sonnet and Opus, not Haiku
+  if (!model.includes('haiku')) {
+    headers['anthropic-beta'] = 'output-128k-2025-02-19';
+  }
+
+  const response = await fetchWithRetry('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'output-128k-2025-02-19',
-    },
+    headers,
     body: JSON.stringify({
-      model: 'claude-sonnet-4-5-20250929',
+      model,
       max_tokens: maxTokens,
       stream: true,
       system: systemPrompt,
@@ -246,8 +279,8 @@ export async function callToolCompletion(
       if (parsed.error?.message) {
         if (response.status === 401) {
           errorMessage = 'Invalid API key. Please check your key in Settings.';
-        } else if (response.status === 429) {
-          errorMessage = 'Rate limit exceeded. Please wait a moment and try again.';
+        } else if (response.status === 429 || response.status === 529) {
+          errorMessage = 'The AI service is temporarily busy. Please try again in a few minutes.';
         } else if (response.status === 400) {
           errorMessage = 'Request error. Please try again with a shorter message.';
         }

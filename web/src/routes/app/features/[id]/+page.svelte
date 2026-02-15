@@ -25,6 +25,18 @@
     updatedAt: string;
   }
 
+  interface UsageRun {
+    agentName: string;
+    inputTokens: number;
+    outputTokens: number;
+  }
+
+  interface UsageData {
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    runs: UsageRun[];
+  }
+
   let feature: Feature | null = $state(null);
   let loading = $state(true);
   let error = $state('');
@@ -33,6 +45,8 @@
   let deletingFeature = $state(false);
   let downloading = $state(false);
   let pollTimer: ReturnType<typeof setInterval> | null = $state(null);
+  let usage: UsageData | null = $state(null);
+  let usageLoaded = $state(false);
 
   // Configure marked for safe defaults
   marked.setOptions({ breaks: true, gfm: true });
@@ -48,14 +62,14 @@
   function statusLabel(status: string): string {
     const labels: Record<string, string> = {
       drafting: 'Drafting',
-      spec_generating: 'Generating spec',
+      spec_generating: 'Generating specification',
       spec_ready: 'Spec ready',
       plan_generating: 'Generating plan',
       plan_ready: 'Plan ready',
-      tests_generating: 'Generating tests',
+      tests_generating: 'Writing test contracts',
       tests_ready: 'Tests ready',
-      implementing: 'Implementing',
-      review: 'Reviewing',
+      implementing: 'Generating code',
+      review: 'Running reviews',
       failed: 'Failed',
       done: 'Done',
     };
@@ -321,6 +335,41 @@
     }
     retrying = false;
   }
+
+  async function loadUsage() {
+    if (!feature || usageLoaded) return;
+    const featureId = page.params.id;
+    const result = await apiFetch<UsageData>(`/api/features/${featureId}/usage`, getToken());
+    if (result.data) {
+      usage = result.data;
+    }
+    usageLoaded = true;
+  }
+
+  function agentDisplayName(name: string): string {
+    const names: Record<string, string> = {
+      spec: 'Specification',
+      planner: 'Implementation plan',
+      contract_test: 'Test contracts',
+      implementer: 'Code generation',
+      security_review: 'Security review',
+      code_review: 'Code review',
+      alignment_review: 'Alignment review',
+    };
+    return names[name] ?? name;
+  }
+
+  function formatTokens(n: number): string {
+    if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+    return String(n);
+  }
+
+  // Load usage when feature reaches done status
+  $effect(() => {
+    if (feature?.status === 'done' && !usageLoaded) {
+      loadUsage();
+    }
+  });
 </script>
 
 <svelte:head>
@@ -509,15 +558,20 @@
       </div>
 
     {:else if feature.status === 'spec_generating'}
-      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
-        <div class="inline-flex items-center gap-3 text-amber-700">
+      <div class="bg-white rounded-xl border border-slate-200 p-8">
+        <div class="flex items-center justify-center gap-3 text-amber-700">
           <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
           <p class="text-sm font-medium">Generating specification...</p>
         </div>
-        <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
+        <p class="mt-3 text-xs text-slate-400 text-center">This usually takes 30-60 seconds.</p>
+        <div class="mt-6 space-y-3">
+          <div class="h-4 bg-gray-200 rounded animate-pulse"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-5/6"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-4/6"></div>
+        </div>
       </div>
 
     {:else if feature.status === 'spec_ready'}
@@ -563,15 +617,20 @@
       </div>
 
     {:else if feature.status === 'plan_generating'}
-      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
-        <div class="inline-flex items-center gap-3 text-amber-700">
+      <div class="bg-white rounded-xl border border-slate-200 p-8">
+        <div class="flex items-center justify-center gap-3 text-amber-700">
           <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
           <p class="text-sm font-medium">Generating implementation plan...</p>
         </div>
-        <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
+        <p class="mt-3 text-xs text-slate-400 text-center">This usually takes 30-60 seconds.</p>
+        <div class="mt-6 space-y-3">
+          <div class="h-4 bg-gray-200 rounded animate-pulse"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-5/6"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-4/6"></div>
+        </div>
       </div>
 
     {:else if feature.status === 'plan_ready'}
@@ -617,15 +676,20 @@
       </div>
 
     {:else if feature.status === 'tests_generating'}
-      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
-        <div class="inline-flex items-center gap-3 text-amber-700">
+      <div class="bg-white rounded-xl border border-slate-200 p-8">
+        <div class="flex items-center justify-center gap-3 text-amber-700">
           <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
-          <p class="text-sm font-medium">Generating test contracts...</p>
+          <p class="text-sm font-medium">Writing test contracts...</p>
         </div>
-        <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
+        <p class="mt-3 text-xs text-slate-400 text-center">This usually takes 30-60 seconds.</p>
+        <div class="mt-6 space-y-3">
+          <div class="h-4 bg-gray-200 rounded animate-pulse"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-5/6"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-4/6"></div>
+        </div>
       </div>
 
     {:else if feature.status === 'tests_ready'}
@@ -671,27 +735,38 @@
       </div>
 
     {:else if feature.status === 'implementing'}
-      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
-        <div class="inline-flex items-center gap-3 text-amber-700">
+      <div class="bg-white rounded-xl border border-slate-200 p-8">
+        <div class="flex items-center justify-center gap-3 text-amber-700">
           <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
           <p class="text-sm font-medium">Generating code...</p>
         </div>
-        <p class="mt-3 text-xs text-slate-400">This usually takes 60-90 seconds.</p>
+        <p class="mt-3 text-xs text-slate-400 text-center">This usually takes 60-90 seconds.</p>
+        <div class="mt-6 space-y-3">
+          <div class="h-4 bg-gray-200 rounded animate-pulse"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-5/6"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-3/6"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-4/6"></div>
+        </div>
       </div>
 
     {:else if feature.status === 'review'}
-      <div class="bg-white rounded-xl border border-slate-200 p-8 text-center">
-        <div class="inline-flex items-center gap-3 text-amber-700">
+      <div class="bg-white rounded-xl border border-slate-200 p-8">
+        <div class="flex items-center justify-center gap-3 text-amber-700">
           <svg class="w-5 h-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
           </svg>
           <p class="text-sm font-medium">Running security and code review...</p>
         </div>
-        <p class="mt-3 text-xs text-slate-400">This usually takes 30-60 seconds.</p>
+        <p class="mt-3 text-xs text-slate-400 text-center">This usually takes 30-60 seconds.</p>
+        <div class="mt-6 space-y-3">
+          <div class="h-4 bg-gray-200 rounded animate-pulse"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-5/6"></div>
+          <div class="h-4 bg-gray-200 rounded animate-pulse w-4/6"></div>
+        </div>
       </div>
 
     {:else if feature.status === 'done'}
@@ -727,6 +802,41 @@
             {/if}
           </button>
         </div>
+
+        {#if usage}
+          <details class="bg-white rounded-xl border border-slate-200">
+            <summary class="px-6 py-4 text-sm font-medium text-slate-700 cursor-pointer hover:bg-slate-50 transition-colors">
+              Token usage — {formatTokens(usage.totalInputTokens)} input, {formatTokens(usage.totalOutputTokens)} output
+            </summary>
+            <div class="px-6 pb-6 border-t border-slate-200 pt-4">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-slate-500 border-b border-slate-100">
+                    <th class="pb-2 font-medium">Agent</th>
+                    <th class="pb-2 font-medium text-right">Input</th>
+                    <th class="pb-2 font-medium text-right">Output</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each usage.runs as run}
+                    <tr class="border-b border-slate-50">
+                      <td class="py-2 text-slate-700">{agentDisplayName(run.agentName)}</td>
+                      <td class="py-2 text-right text-slate-500">{formatTokens(run.inputTokens)}</td>
+                      <td class="py-2 text-right text-slate-500">{formatTokens(run.outputTokens)}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+                <tfoot>
+                  <tr class="font-medium text-slate-700">
+                    <td class="pt-2">Total</td>
+                    <td class="pt-2 text-right">{formatTokens(usage.totalInputTokens)}</td>
+                    <td class="pt-2 text-right">{formatTokens(usage.totalOutputTokens)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </details>
+        {/if}
       </div>
 
     {:else if feature.status === 'failed'}

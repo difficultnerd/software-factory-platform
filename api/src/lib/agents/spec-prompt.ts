@@ -75,6 +75,15 @@ List edge cases and how each should be handled.
 - Session management: timeout requirements, concurrent session limits
 - Compliance: note any OWASP ASVS Level 2 or Australian ISM controls that are particularly relevant to this feature
 
+## Risk Classification
+
+Assess the overall risk level of this feature:
+- **Low**: No user accounts, no sensitive data, no external integrations (e.g. games, calculators, static content tools)
+- **Standard**: User accounts, personal data, CRUD operations, external API calls
+- **High**: Financial transactions, health data, multi-tenant admin, authentication systems
+
+State the risk level in bold and justify it in one sentence.
+
 ## Rules
 
 - Be thorough and precise. Downstream agents cannot ask follow-up questions.

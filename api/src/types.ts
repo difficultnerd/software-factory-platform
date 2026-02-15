@@ -9,6 +9,7 @@ export interface Bindings {
   SUPABASE_SERVICE_ROLE_KEY: string;
   ALLOWED_ORIGIN: string;
   ARTIFACTS: R2Bucket;
+  PIPELINE_QUEUE: Queue;
 }
 
 export interface Variables {
