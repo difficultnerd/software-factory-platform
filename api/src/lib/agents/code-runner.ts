@@ -46,12 +46,13 @@ interface CodeRunnerParams {
   planMarkdown: string;
   env: Bindings;
   maxTokens?: number;
+  model?: string;
 }
 
 const MAX_RETRIES = 2;
 
 export async function runCodeAgentWithToolUse(params: CodeRunnerParams): Promise<CodeRunnerResult> {
-  const { featureId, userId, apiKey, specMarkdown, planMarkdown, env, maxTokens = 64000 } = params;
+  const { featureId, userId, apiKey, specMarkdown, planMarkdown, env, maxTokens = 64000, model } = params;
   const serviceClient = createServiceClient(env);
 
   const systemPrompt = getCodeSystemPrompt();
@@ -80,6 +81,7 @@ export async function runCodeAgentWithToolUse(params: CodeRunnerParams): Promise
       [WRITE_FILES_TOOL],
       maxTokens,
       { type: 'tool', name: 'write_files' },
+      model,
     );
 
     if (!result.ok) {
