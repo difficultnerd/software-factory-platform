@@ -218,7 +218,7 @@
             disabled={approving}
             class="px-5 py-2.5 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {approving ? 'Approving...' : 'Approve specification'}
+            {approving ? 'Generating plan...' : 'Approve specification'}
           </button>
           <a
             href="/app/features?feature={feature.id}"
