@@ -1,8 +1,10 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project Overview
 
-Build Practical (buildpractical.com) is a multi-tenant AI-powered software platform. Non-technical users describe software in conversation with a BA agent, and a pipeline of six constrained AI agents builds it.
+Build Practical (buildpractical.com) is a multi-tenant AI-powered software platform. Non-technical users describe software in conversation with a BA agent, and a pipeline of constrained AI agents builds it: BA chat -> spec generation -> plan generation -> code generation -> download as zip.
 
 ## Live URLs
 
@@ -12,81 +14,15 @@ Build Practical (buildpractical.com) is a multi-tenant AI-powered software platf
 
 ## Tech Stack
 
-- API: Cloudflare Workers, Hono, TypeScript strict mode, Zod validation
-- Frontend: SvelteKit 5 (Svelte 5 runes syntax: $props, $state, $derived), Tailwind CSS, Cloudflare Pages
-- Database: Supabase PostgreSQL with RLS on ALL tables (user_id = auth.uid())
-- Auth: Supabase Auth, JWKS-based JWT verification (asymmetric, no shared secret)
-- Secrets: Supabase Vault (encrypted at rest, service-role only via security definer functions)
-- Storage: Cloudflare R2 for generated artifacts
-- AI: Anthropic Claude Sonnet via user BYOK keys
-
-## Monorepo Structure
-
-- `api/` - Cloudflare Workers (Hono). Dev: `npm run dev:api`
-- `web/` - SvelteKit on Cloudflare Pages. Dev: `npm run dev:web`
-- `supabase/migrations/` - SQL migrations (run manually in Supabase SQL Editor)
-- `docs/` - Architecture and governance documents
-- `.github/workflows/ci.yml` - CI pipeline
-
-## Key Conventions
-
-- TypeScript strict mode, no `any`
-- All user input validated with Zod schemas at API boundaries
-- All database tables MUST have RLS policies
-- User secrets stored in Supabase Vault via helper functions (store_user_secret, read_user_secret, delete_user_secret, check_user_secret_exists) - these are service-role only
-- Middleware chain order: errors -> headers -> CORS -> auth -> routes
-- Structured JSON logging via src/lib/logger.ts
-- Australian English in UI copy
-- No emojis in UI
-
-## API Middleware Kernel
-
-Files in api/src/middleware/ are the security trust root. Do NOT modify without explicit approval:
-- errors.ts - Global error handler, generic error responses
-- headers.ts - Security headers (HSTS, CSP, X-Frame-Options, etc.)
-- auth.ts - JWKS JWT verification, extracts userId
-- validation.ts - Zod schema validation for body and query params
-
-## Auth Details
-
-- Supabase Auth with email + password, email confirmation required
-- New API key format: publishable key (sb_publishable_...) = anon key, secret key (sb_secret_...) = service role key
-- JWKS URL: https://blyljuoajecrzoyxomaj.supabase.co/auth/v1/.well-known/jwks.json
-- Frontend uses @supabase/ssr for cookie-based session management
-- Auth guard on /app/* routes (see web/src/routes/app/+layout.server.ts)
-
-## Database Tables (already applied)
-
-- profiles: extends auth.users, auto-created via trigger
-- features: pipeline state machine (drafting -> spec_generating -> ... -> done/failed)
-- chat_messages: BA agent conversation history
-- artifacts: generated code metadata (files in R2)
-- agent_runs: audit trail with token usage
-
-## Vault Helper Functions (service-role only)
-
-```sql
-select public.store_user_secret(user_id, 'anthropic_key', 'sk-ant-...', 'Anthropic API key');
-select public.read_user_secret(user_id, 'anthropic_key');
-select public.delete_user_secret(user_id, 'anthropic_key');
-select public.check_user_secret_exists(user_id, 'anthropic_key');
-```
-
-## Three Output Modes
-
-1. Components (Data + Views): Declarative app definitions, rendered by platform runtime
-2. Workflows (Triggers + Actions + AI): Workflow definitions, executed by platform runtime
-3. Full Code (Escape Hatch): TypeScript source code, download as zip
-
-See docs/ARCHITECTURE.md for full details.
-
-## Environment Variables
-
-API (api/.dev.vars):
-- SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
-
-Web (web/.env):
-- PUBLIC_SUPABASE_URL, PUBLIC_SUPABASE_ANON_KEY, PUBLIC_API_URL
+- **API**: Cloudflare Workers, Hono, TypeScript strict mode, Zod validation
+- **Frontend**: SvelteKit 5 (Svelte 5 runes syntax: `$props`, `$state`, `$derived`), Tailwind CSS, Cloudflare Pages
+- **Database**: Supabase PostgreSQL with RLS on ALL tables (`user_id = auth.uid()`)
+- **Auth**: Supabase Auth, JWKS-based JWT verification (asymmetric, no shared secret)
+- **Secrets**: Supabase Vault (encrypted at rest, service-role only via security definer functions)
+- **Storage**: Cloudflare R2 (`buildpractical-artifacts` bucket) for generated code files
+- **AI**: Anthropic Claude Sonnet via user BYOK keys
+- **Zip**: `fflate` for Workers-compatible zip generation
+- **Markdown**: `marked` for rendering spec/plan markdown in the frontend
 
 ## Build Commands
 
@@ -97,38 +33,110 @@ npm run dev:api                      # Local API dev server (port 8787)
 npm run dev:web                      # Local web dev server (port 5173)
 ```
 
+## Monorepo Structure
+
+- `api/` — Cloudflare Workers (Hono)
+- `web/` — SvelteKit on Cloudflare Pages
+- `supabase/migrations/` — SQL migrations (run manually in Supabase SQL Editor)
+- `docs/` — Architecture and governance documents
+- `.github/workflows/ci.yml` — CI pipeline
+
+## Key Conventions
+
+- TypeScript strict mode, no `any`
+- All user input validated with Zod schemas at API boundaries
+- All database tables MUST have RLS policies
+- User secrets stored in Supabase Vault via helper functions (`store_user_secret`, `read_user_secret`, `delete_user_secret`, `check_user_secret_exists`) — these are service-role only
+- Middleware chain order: errors -> headers -> CORS -> auth -> routes
+- Structured JSON logging via `api/src/lib/logger.ts`
+- Australian English in UI copy (e.g. "colour", "organisation", "behaviour")
+- No emojis in UI
+- Supabase client patterns: authenticated client for user-scoped queries (RLS), service client for admin operations
+
+## API Middleware Kernel
+
+Files in `api/src/middleware/` are the security trust root. Do NOT modify without explicit approval:
+- `errors.ts` — Global error handler, generic error responses
+- `headers.ts` — Security headers (HSTS, CSP, X-Frame-Options, etc.)
+- `auth.ts` — JWKS JWT verification, extracts `userId`
+- `validation.ts` — Zod schema validation for body and query params
+
+## Pipeline Architecture
+
+The feature pipeline is a state machine managed in the `features` table:
+
+```
+drafting -> spec_generating -> spec_ready -> (user approves) ->
+plan_generating -> plan_ready -> (user approves) ->
+code_generating -> done / failed
+```
+
+Each agent phase follows the same pattern (see `api/src/routes/features.ts`):
+1. Read user's API key from Vault via service client RPC
+2. Call `runAgent()` with the agent's system/user prompts
+3. On success: store output, transition to next status
+4. On failure: set status to `failed` with error message
+
+Agent prompts live in `api/src/lib/agents/`:
+- `governance.ts` — Shared platform context injected into all prompts
+- `spec-prompt.ts` — Specification agent
+- `plan-prompt.ts` — Planner agent
+- `code-prompt.ts` — Implementer agent (outputs JSON array of `{path, content}` file objects)
+- `runner.ts` — Generic agent runner (calls Anthropic, logs `agent_runs`)
+
+The code agent's output is parsed as JSON, each file uploaded to R2 under `{userId}/{featureId}/{filePath}`, and metadata inserted into the `artifacts` table.
+
+## API Routes
+
+- `api/src/routes/settings.ts` — API key management (Vault CRUD)
+- `api/src/routes/chat.ts` — BA agent chat (streaming), conversation history
+- `api/src/routes/features.ts` — Feature lifecycle: list, detail, delete, rename, confirm brief, approve spec/plan, download zip
+
+## Frontend Key Pages
+
+- `web/src/routes/app/+page.svelte` — Dashboard (feature list with status badges, inline title editing)
+- `web/src/routes/app/features/+page.svelte` — Chat interface for BA agent
+- `web/src/routes/app/features/[id]/+page.svelte` — Feature detail (status-specific views, markdown rendering, approve buttons, download)
+- `web/src/routes/app/settings/+page.svelte` — API key management
+
+## Database Schema
+
+Defined in `supabase/migrations/20260215000000_foundation.sql`. Key tables:
+- **profiles** — Extends `auth.users`, auto-created via trigger
+- **features** — Pipeline state machine with status CHECK constraint, stores brief/spec/plan markdown
+- **chat_messages** — BA agent conversation history
+- **artifacts** — Generated code file metadata (file paths, R2 keys); actual files in R2
+- **agent_runs** — Audit trail with token usage
+
+**Important**: The `features.status` CHECK constraint and `artifacts` table schema must match what the application code expects. When adding new statuses, update the CHECK constraint via SQL in the Supabase SQL Editor. See `docs/SESSION-STATUS.md` for details on schema changes needed.
+
+## Environment Variables
+
+API (`api/.dev.vars`):
+- `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ALLOWED_ORIGIN`
+
+Web (`web/.env`):
+- `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `PUBLIC_API_URL`
+
 ## Deployment
 
-Automatic via GitHub Actions on merge to main. API deploys to Cloudflare Workers, web builds and deploys to Cloudflare Pages. Push directly to main (no branch protection yet).
+Automatic via GitHub Actions on push to main. API deploys to Cloudflare Workers, web builds and deploys to Cloudflare Pages. Push directly to main (no branch protection yet).
 
-## Current State
+R2 bucket (`buildpractical-artifacts`) must exist in the Cloudflare account. The Cloudflare API token in GitHub Actions needs **Workers R2 Storage: Edit** permission.
 
-Session 1 complete: auth working, CI green, custom domains live, database schema applied, Vault functions deployed. Dashboard shows empty state. Settings page has placeholder for API key management.
+## Auth Details
 
-## What Needs Building Next
+- Supabase Auth with email + password, email confirmation required
+- JWKS URL: `https://blyljuoajecrzoyxomaj.supabase.co/auth/v1/.well-known/jwks.json`
+- Frontend uses `@supabase/ssr` for cookie-based session management
+- Auth guard on `/app/*` routes (see `web/src/routes/app/+layout.server.ts`)
+- Download endpoint authenticates via `Authorization: Bearer` header (fetched as blob client-side)
 
-### Session 2a: API Key Settings
-- API endpoint: POST/DELETE /api/settings/api-key (store/delete via Vault RPC using service client)
-- API endpoint: GET /api/settings/api-key (check exists, return last 4 chars hint)
-- Settings page: form to paste key, display hint, delete button
-- Key stored as Vault secret named "{user_id}/anthropic_key"
+## Vault Helper Functions (service-role only)
 
-### Session 2b: BA Agent Chat
-- BA agent system prompt (knows platform capabilities, three modes, asks clarifying questions, produces structured brief)
-- API endpoint: POST /api/chat/message (streaming response using user's BYOK key)
-- API endpoint: GET /api/chat/:featureId (conversation history)
-- Chat UI: message bubbles, streaming text display, send box
-- Feature creation flow: user confirms brief -> feature created with status "spec_generating"
-
-### Session 2c: Pipeline Orchestration
-- Agent runner service (accepts agent name, tenant context, user's API key from Vault)
-- Port agent logic from github.com/difficultnerd/software-factory-template/.github/scripts/
-- State machine transitions triggered by agent completion and user approvals
-- Status polling endpoint and frontend polling
-- Approve/reject UI at each pipeline stage
-
-### Session 2d: Code Output
-- R2 storage for generated artifacts
-- Download as zip endpoint
-- Feature list page with status badges
-- Feature detail page (rendered markdown for spec/plan, download button)
+```sql
+select public.store_user_secret(user_id, 'anthropic_key', 'sk-ant-...', 'Anthropic API key');
+select public.read_user_secret(user_id, 'anthropic_key');
+select public.delete_user_secret(user_id, 'anthropic_key');
+select public.check_user_secret_exists(user_id, 'anthropic_key');
+```
