@@ -502,6 +502,76 @@ async function runSpecAgent(
   }
 }
 
+/**
+ * Extracts complete {path, content} objects from a truncated JSON array.
+ * Walks the string tracking brace depth and string state to find objects
+ * that were fully closed before the truncation point.
+ */
+function salvageJsonArray(text: string): Array<{ path: string; content: string }> {
+  // Find the opening bracket
+  const start = text.indexOf('[');
+  if (start === -1) return [];
+
+  const results: Array<{ path: string; content: string }> = [];
+  let i = start + 1;
+  let objectStart = -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  while (i < text.length) {
+    const ch = text[i];
+
+    if (escape) {
+      escape = false;
+      i++;
+      continue;
+    }
+
+    if (ch === '\\' && inString) {
+      escape = true;
+      i++;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      i++;
+      continue;
+    }
+
+    if (inString) {
+      i++;
+      continue;
+    }
+
+    if (ch === '{') {
+      if (depth === 0) {
+        objectStart = i;
+      }
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0 && objectStart !== -1) {
+        const objectText = text.slice(objectStart, i + 1);
+        try {
+          const obj = JSON.parse(objectText) as { path?: string; content?: string };
+          if (typeof obj.path === 'string' && typeof obj.content === 'string') {
+            results.push({ path: obj.path, content: obj.content });
+          }
+        } catch {
+          // Skip malformed objects
+        }
+        objectStart = -1;
+      }
+    }
+
+    i++;
+  }
+
+  return results;
+}
+
 // Background task: run code agent
 async function runCodeAgent(
   env: AppEnv['Bindings'],
@@ -543,12 +613,13 @@ async function runCodeAgent(
       systemPrompt: getCodeSystemPrompt(),
       userPrompt: getCodeUserPrompt(specMarkdown, planMarkdown),
       env,
-      maxTokens: 16384,
+      maxTokens: 64000,
     });
 
     if (result.ok) {
       // Parse JSON output into file array
       let files: Array<{ path: string; content: string }>;
+      let wasTruncated = false;
       try {
         // Strip markdown fences if the model wrapped the output
         let jsonText = result.text.trim();
@@ -560,18 +631,39 @@ async function runCodeAgent(
           throw new Error('Expected a non-empty array of file objects');
         }
       } catch (parseErr) {
-        const message = parseErr instanceof Error ? parseErr.message : 'Failed to parse code output';
-        logger.error({
-          event: 'agent.implementer.parse',
-          actor: userId,
-          outcome: 'failure',
-          metadata: { featureId, error: message },
-        });
-        await serviceClient
-          .from('features')
-          .update({ status: 'failed', error_message: `Code generation produced invalid output: ${message}` })
-          .eq('id', featureId);
-        return;
+        // If output was truncated due to max_tokens, try to salvage complete objects
+        if (result.stopReason === 'max_tokens') {
+          const salvaged = salvageJsonArray(result.text);
+          if (salvaged.length > 0) {
+            files = salvaged;
+            wasTruncated = true;
+            logger.info({
+              event: 'agent.implementer.salvage',
+              actor: userId,
+              outcome: 'success',
+              metadata: { featureId, salvaged: salvaged.length },
+            });
+          } else {
+            await serviceClient
+              .from('features')
+              .update({ status: 'failed', error_message: 'Code generation output was truncated and no complete files could be recovered. Please try again with a simpler feature.' })
+              .eq('id', featureId);
+            return;
+          }
+        } else {
+          const message = parseErr instanceof Error ? parseErr.message : 'Failed to parse code output';
+          logger.error({
+            event: 'agent.implementer.parse',
+            actor: userId,
+            outcome: 'failure',
+            metadata: { featureId, error: message },
+          });
+          await serviceClient
+            .from('features')
+            .update({ status: 'failed', error_message: `Code generation produced invalid output: ${message}` })
+            .eq('id', featureId);
+          return;
+        }
       }
 
       // Upload each file to R2 and record in artifacts table
@@ -588,9 +680,14 @@ async function runCodeAgent(
         });
       }
 
+      const updateFields: Record<string, string> = { status: 'done' };
+      if (wasTruncated) {
+        updateFields.error_message = `Output was truncated: ${files.length} complete file(s) were recovered, but some files may be missing. You can download what was generated and try again if needed.`;
+      }
+
       await serviceClient
         .from('features')
-        .update({ status: 'done' })
+        .update(updateFields)
         .eq('id', featureId);
     } else {
       await serviceClient

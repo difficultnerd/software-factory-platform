@@ -10,7 +10,7 @@ interface ChatMessage {
 }
 
 type CompletionResult =
-  | { ok: true; text: string; inputTokens: number; outputTokens: number }
+  | { ok: true; text: string; inputTokens: number; outputTokens: number; stopReason: string }
   | { ok: false; error: string };
 
 /**
@@ -26,6 +26,7 @@ export async function callCompletion(
   let text = '';
   let inputTokens = 0;
   let outputTokens = 0;
+  let stopReason = 'unknown';
 
   try {
     for await (const event of streamChatCompletion(apiKey, messages, systemPrompt, maxTokens ?? 8192)) {
@@ -34,6 +35,7 @@ export async function callCompletion(
       } else if (event.type === 'done') {
         inputTokens = event.inputTokens;
         outputTokens = event.outputTokens;
+        stopReason = event.stopReason;
       } else if (event.type === 'error') {
         return { ok: false, error: event.message };
       }
@@ -46,12 +48,12 @@ export async function callCompletion(
     return { ok: false, error: 'AI service returned empty response' };
   }
 
-  return { ok: true, text, inputTokens, outputTokens };
+  return { ok: true, text, inputTokens, outputTokens, stopReason };
 }
 
 export type StreamEvent =
   | { type: 'text'; text: string }
-  | { type: 'done'; inputTokens: number; outputTokens: number }
+  | { type: 'done'; inputTokens: number; outputTokens: number; stopReason: string }
   | { type: 'error'; message: string };
 
 export async function* streamChatCompletion(
@@ -108,6 +110,7 @@ export async function* streamChatCompletion(
   let buffer = '';
   let inputTokens = 0;
   let outputTokens = 0;
+  let stopReason = 'unknown';
 
   try {
     while (true) {
@@ -151,12 +154,16 @@ export async function* streamChatCompletion(
               yield { type: 'text', text: delta.text };
             }
           } else if (eventType === 'message_delta') {
+            const delta = parsed.delta as Record<string, unknown> | undefined;
+            if (typeof delta?.stop_reason === 'string') {
+              stopReason = delta.stop_reason;
+            }
             const usage = parsed.usage as Record<string, number> | undefined;
             if (usage?.output_tokens) {
               outputTokens = usage.output_tokens;
             }
           } else if (eventType === 'message_stop') {
-            yield { type: 'done', inputTokens, outputTokens };
+            yield { type: 'done', inputTokens, outputTokens, stopReason };
             return;
           } else if (eventType === 'error') {
             const error = parsed.error as Record<string, unknown> | undefined;
@@ -173,7 +180,7 @@ export async function* streamChatCompletion(
     }
 
     // If we exit the loop without message_stop, still yield done
-    yield { type: 'done', inputTokens, outputTokens };
+    yield { type: 'done', inputTokens, outputTokens, stopReason };
   } finally {
     reader.releaseLock();
   }

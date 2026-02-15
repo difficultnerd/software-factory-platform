@@ -440,6 +440,13 @@
           </details>
         {/if}
 
+        {#if feature.errorMessage}
+          <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <p class="text-sm text-amber-800 font-medium">Partial result</p>
+            <p class="mt-1 text-sm text-amber-700">{feature.errorMessage}</p>
+          </div>
+        {/if}
+
         <div class="bg-green-50 border border-green-200 rounded-lg p-6 text-center">
           <p class="text-sm text-green-800 font-medium">Code generated successfully</p>
           <p class="mt-1 text-sm text-green-700">

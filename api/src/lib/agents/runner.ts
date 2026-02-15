@@ -21,7 +21,7 @@ interface RunAgentParams {
 }
 
 type RunAgentResult =
-  | { ok: true; text: string; inputTokens: number; outputTokens: number }
+  | { ok: true; text: string; inputTokens: number; outputTokens: number; stopReason: string }
   | { ok: false; error: string };
 
 export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
