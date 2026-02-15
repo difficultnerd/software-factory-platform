@@ -269,7 +269,7 @@
             disabled={confirming || streaming}
             class="mt-3 px-4 py-2 text-sm font-medium text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {confirming ? 'Confirming...' : 'Confirm brief and start building'}
+            {confirming ? 'Generating specification (this takes about a minute)...' : 'Confirm brief and start building'}
           </button>
         </div>
       </div>

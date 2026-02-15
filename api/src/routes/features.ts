@@ -146,10 +146,8 @@ features.post('/:id/confirm', validateBody(confirmSchema), async (c) => {
     metadata: { featureId },
   });
 
-  // Kick off spec agent in the background
-  c.executionCtx.waitUntil(
-    runSpecAgent(c.env, userId, featureId, feature.title, briefMarkdown),
-  );
+  // Run spec agent synchronously — waitUntil was silently failing
+  await runSpecAgent(c.env, userId, featureId, feature.title, briefMarkdown);
 
   return c.json({ success: true });
 });
@@ -207,10 +205,8 @@ features.post('/:id/approve-spec', async (c) => {
     metadata: { featureId },
   });
 
-  // Kick off plan agent in the background
-  c.executionCtx.waitUntil(
-    runPlanAgent(c.env, userId, featureId, f.spec_markdown ?? ''),
-  );
+  // Run plan agent synchronously
+  await runPlanAgent(c.env, userId, featureId, f.spec_markdown ?? '');
 
   return c.json({ success: true });
 });
