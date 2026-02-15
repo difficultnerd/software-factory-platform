@@ -13,63 +13,40 @@ type CompletionResult =
   | { ok: true; text: string; inputTokens: number; outputTokens: number }
   | { ok: false; error: string };
 
+/**
+ * Non-streaming completion that uses streaming internally to avoid
+ * Cloudflare 524 timeouts on long-running API calls.
+ */
 export async function callCompletion(
   apiKey: string,
   messages: ChatMessage[],
   systemPrompt: string,
   maxTokens?: number,
 ): Promise<CompletionResult> {
-  let response: Response;
+  let text = '';
+  let inputTokens = 0;
+  let outputTokens = 0;
+
   try {
-    response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5-20250929',
-        max_tokens: maxTokens ?? 8192,
-        stream: false,
-        system: systemPrompt,
-        messages,
-      }),
-    });
+    for await (const event of streamChatCompletion(apiKey, messages, systemPrompt, maxTokens ?? 8192)) {
+      if (event.type === 'text') {
+        text += event.text;
+      } else if (event.type === 'done') {
+        inputTokens = event.inputTokens;
+        outputTokens = event.outputTokens;
+      } else if (event.type === 'error') {
+        return { ok: false, error: event.message };
+      }
+    }
   } catch {
     return { ok: false, error: 'Failed to connect to AI service' };
   }
 
-  if (!response.ok) {
-    if (response.status === 401) {
-      return { ok: false, error: 'Invalid API key. Please check your key in Settings.' };
-    }
-    if (response.status === 429) {
-      return { ok: false, error: 'Rate limit exceeded. Please wait and try again.' };
-    }
-    return { ok: false, error: `AI service error (HTTP ${response.status})` };
+  if (!text) {
+    return { ok: false, error: 'AI service returned empty response' };
   }
 
-  try {
-    const body = (await response.json()) as {
-      content?: Array<{ type: string; text?: string }>;
-      usage?: { input_tokens?: number; output_tokens?: number };
-    };
-
-    const textBlock = body.content?.find((b) => b.type === 'text');
-    if (!textBlock?.text) {
-      return { ok: false, error: 'AI service returned empty response' };
-    }
-
-    return {
-      ok: true,
-      text: textBlock.text,
-      inputTokens: body.usage?.input_tokens ?? 0,
-      outputTokens: body.usage?.output_tokens ?? 0,
-    };
-  } catch {
-    return { ok: false, error: 'Failed to parse AI service response' };
-  }
+  return { ok: true, text, inputTokens, outputTokens };
 }
 
 export type StreamEvent =
@@ -81,6 +58,7 @@ export async function* streamChatCompletion(
   apiKey: string,
   messages: ChatMessage[],
   systemPrompt: string,
+  maxTokens: number = 4096,
 ): AsyncGenerator<StreamEvent> {
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -91,7 +69,7 @@ export async function* streamChatCompletion(
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 4096,
+      max_tokens: maxTokens,
       stream: true,
       system: systemPrompt,
       messages,
