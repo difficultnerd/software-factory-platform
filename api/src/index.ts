@@ -9,6 +9,8 @@ import { errorHandler } from './middleware/errors.js';
 import { securityHeaders } from './middleware/headers.js';
 import { authMiddleware } from './middleware/auth.js';
 import { settings } from './routes/settings.js';
+import { chat } from './routes/chat.js';
+import { features } from './routes/features.js';
 import { logger } from './lib/logger.js';
 import type { AppEnv } from './types.js';
 
@@ -36,6 +38,8 @@ app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOStri
 app.use('/api/*', authMiddleware());
 
 app.route('/api/settings', settings);
+app.route('/api/chat', chat);
+app.route('/api/features', features);
 
 app.get('/api/me', (c) => {
   const userId = c.get('userId');
