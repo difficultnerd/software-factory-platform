@@ -282,12 +282,22 @@
           <p class="mt-1 text-sm text-blue-700">
             Your feature is now being processed by the pipeline.
           </p>
-          <a
-            href="/app"
-            class="mt-3 inline-block px-4 py-2 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors"
-          >
-            Back to dashboard
-          </a>
+          <div class="mt-3 flex gap-3">
+            {#if featureId}
+              <a
+                href="/app/features/{featureId}"
+                class="inline-block px-4 py-2 text-sm font-medium text-white bg-brand-600 rounded-lg hover:bg-brand-700 transition-colors"
+              >
+                View progress
+              </a>
+            {/if}
+            <a
+              href="/app"
+              class="inline-block px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+            >
+              Back to dashboard
+            </a>
+          </div>
         </div>
       </div>
     {/if}

@@ -1,12 +1,75 @@
 /**
- * @file Anthropic streaming client
- * @purpose Raw fetch wrapper for Anthropic Messages API with SSE streaming
+ * @file Anthropic client
+ * @purpose Raw fetch wrapper for Anthropic Messages API (streaming and non-streaming)
  * @invariants Never stores or logs API keys; handles partial UTF-8 and SSE buffering
  */
 
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+type CompletionResult =
+  | { ok: true; text: string; inputTokens: number; outputTokens: number }
+  | { ok: false; error: string };
+
+export async function callCompletion(
+  apiKey: string,
+  messages: ChatMessage[],
+  systemPrompt: string,
+  maxTokens?: number,
+): Promise<CompletionResult> {
+  let response: Response;
+  try {
+    response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-5-20250929',
+        max_tokens: maxTokens ?? 8192,
+        stream: false,
+        system: systemPrompt,
+        messages,
+      }),
+    });
+  } catch {
+    return { ok: false, error: 'Failed to connect to AI service' };
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      return { ok: false, error: 'Invalid API key. Please check your key in Settings.' };
+    }
+    if (response.status === 429) {
+      return { ok: false, error: 'Rate limit exceeded. Please wait and try again.' };
+    }
+    return { ok: false, error: `AI service error (HTTP ${response.status})` };
+  }
+
+  try {
+    const body = (await response.json()) as {
+      content?: Array<{ type: string; text?: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+
+    const textBlock = body.content?.find((b) => b.type === 'text');
+    if (!textBlock?.text) {
+      return { ok: false, error: 'AI service returned empty response' };
+    }
+
+    return {
+      ok: true,
+      text: textBlock.text,
+      inputTokens: body.usage?.input_tokens ?? 0,
+      outputTokens: body.usage?.output_tokens ?? 0,
+    };
+  } catch {
+    return { ok: false, error: 'Failed to parse AI service response' };
+  }
 }
 
 export type StreamEvent =
