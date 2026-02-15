@@ -279,48 +279,64 @@ async function runSpecAgent(
 ): Promise<void> {
   const serviceClient = createServiceClient(env);
 
-  // Read API key from Vault
-  const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
-    'read_user_secret',
-    { p_user_id: userId, p_name: 'anthropic_key' },
-  );
+  try {
+    // Read API key from Vault
+    const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
+      'read_user_secret',
+      { p_user_id: userId, p_name: 'anthropic_key' },
+    );
 
-  if (vaultError || !apiKeyData) {
+    if (vaultError || !apiKeyData) {
+      logger.error({
+        event: 'agent.spec.vault_read',
+        actor: userId,
+        outcome: 'failure',
+        metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
+      });
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
+        .eq('id', featureId);
+      return;
+    }
+
+    const apiKey = String(apiKeyData);
+
+    const result = await runAgent({
+      agentName: 'spec',
+      featureId,
+      userId,
+      apiKey,
+      systemPrompt: getSpecSystemPrompt(),
+      userPrompt: getSpecUserPrompt(briefMarkdown, title),
+      env,
+    });
+
+    if (result.ok) {
+      await serviceClient
+        .from('features')
+        .update({ spec_markdown: result.text, status: 'spec_ready' })
+        .eq('id', featureId);
+    } else {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: result.error })
+        .eq('id', featureId);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error in spec agent';
     logger.error({
-      event: 'agent.spec.vault_read',
+      event: 'agent.spec.crash',
       actor: userId,
       outcome: 'failure',
-      metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
+      metadata: { featureId, error: message },
     });
-    await serviceClient
-      .from('features')
-      .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
-      .eq('id', featureId);
-    return;
-  }
-
-  const apiKey = String(apiKeyData);
-
-  const result = await runAgent({
-    agentName: 'spec',
-    featureId,
-    userId,
-    apiKey,
-    systemPrompt: getSpecSystemPrompt(),
-    userPrompt: getSpecUserPrompt(briefMarkdown, title),
-    env,
-  });
-
-  if (result.ok) {
-    await serviceClient
-      .from('features')
-      .update({ spec_markdown: result.text, status: 'spec_ready' })
-      .eq('id', featureId);
-  } else {
-    await serviceClient
-      .from('features')
-      .update({ status: 'failed', error_message: result.error })
-      .eq('id', featureId);
+    try {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: `Spec agent error: ${message}` })
+        .eq('id', featureId);
+    } catch { /* last resort — nothing more we can do */ }
   }
 }
 
@@ -333,47 +349,63 @@ async function runPlanAgent(
 ): Promise<void> {
   const serviceClient = createServiceClient(env);
 
-  // Read API key from Vault
-  const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
-    'read_user_secret',
-    { p_user_id: userId, p_name: 'anthropic_key' },
-  );
+  try {
+    // Read API key from Vault
+    const { data: apiKeyData, error: vaultError } = await serviceClient.rpc(
+      'read_user_secret',
+      { p_user_id: userId, p_name: 'anthropic_key' },
+    );
 
-  if (vaultError || !apiKeyData) {
+    if (vaultError || !apiKeyData) {
+      logger.error({
+        event: 'agent.planner.vault_read',
+        actor: userId,
+        outcome: 'failure',
+        metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
+      });
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
+        .eq('id', featureId);
+      return;
+    }
+
+    const apiKey = String(apiKeyData);
+
+    const result = await runAgent({
+      agentName: 'planner',
+      featureId,
+      userId,
+      apiKey,
+      systemPrompt: getPlanSystemPrompt(),
+      userPrompt: getPlanUserPrompt(specMarkdown),
+      env,
+    });
+
+    if (result.ok) {
+      await serviceClient
+        .from('features')
+        .update({ plan_markdown: result.text, status: 'plan_ready' })
+        .eq('id', featureId);
+    } else {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: result.error })
+        .eq('id', featureId);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error in plan agent';
     logger.error({
-      event: 'agent.planner.vault_read',
+      event: 'agent.planner.crash',
       actor: userId,
       outcome: 'failure',
-      metadata: { featureId, error: vaultError?.message ?? 'No API key found' },
+      metadata: { featureId, error: message },
     });
-    await serviceClient
-      .from('features')
-      .update({ status: 'failed', error_message: 'Failed to read API key. Please check your key in Settings.' })
-      .eq('id', featureId);
-    return;
-  }
-
-  const apiKey = String(apiKeyData);
-
-  const result = await runAgent({
-    agentName: 'planner',
-    featureId,
-    userId,
-    apiKey,
-    systemPrompt: getPlanSystemPrompt(),
-    userPrompt: getPlanUserPrompt(specMarkdown),
-    env,
-  });
-
-  if (result.ok) {
-    await serviceClient
-      .from('features')
-      .update({ plan_markdown: result.text, status: 'plan_ready' })
-      .eq('id', featureId);
-  } else {
-    await serviceClient
-      .from('features')
-      .update({ status: 'failed', error_message: result.error })
-      .eq('id', featureId);
+    try {
+      await serviceClient
+        .from('features')
+        .update({ status: 'failed', error_message: `Plan agent error: ${message}` })
+        .eq('id', featureId);
+    } catch { /* last resort — nothing more we can do */ }
   }
 }

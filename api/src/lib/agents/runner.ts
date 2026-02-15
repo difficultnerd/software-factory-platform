@@ -49,7 +49,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       feature_id: featureId,
       user_id: userId,
       agent_name: agentName,
-      status: 'completed',
+      status: 'success',
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,
     });
