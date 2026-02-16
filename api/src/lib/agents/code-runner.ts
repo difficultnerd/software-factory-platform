@@ -85,7 +85,7 @@ export async function runCodeAgentWithToolUse(params: CodeRunnerParams): Promise
     );
 
     if (!result.ok) {
-      // Truncation that couldn't be salvaged — retry with smaller output request
+      // Truncation that couldn't be salvaged — retry with conciseness instruction
       if (result.error.includes('truncated') && attempt < MAX_RETRIES) {
         logger.info({
           event: 'agent.implementer.truncation_retry',
@@ -93,8 +93,12 @@ export async function runCodeAgentWithToolUse(params: CodeRunnerParams): Promise
           outcome: 'info',
           metadata: { featureId, attempt, error: result.error },
         });
-        // Reset messages and retry — the model will try again from scratch
-        messages.length = 1; // keep only the original user prompt
+        // Reset to original prompt and add instruction to reduce output size
+        messages.length = 0;
+        messages.push({
+          role: 'user',
+          content: userPrompt + '\n\nIMPORTANT: A previous attempt was truncated due to output length limits. You MUST keep your output concise. Minimise comments and whitespace. Combine smaller files where possible. Focus on the most critical files first.',
+        });
         continue;
       }
       // Genuine API error — log and return immediately, no retry
