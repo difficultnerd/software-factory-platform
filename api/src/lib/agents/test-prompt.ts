@@ -134,6 +134,7 @@ ${securitySection}
 
 - Be thorough — every requirement from the specification must have at least one test contract.
 - Be specific — vague criteria like "should work correctly" are not acceptable.
+- **Be concise.** Use Given/When/Then one-liners, not multi-sentence scenarios. Group related criteria into tables where possible. Skip the "Why this matters" explanation for edge cases. The entire document should be under 3000 words.
 - Use Australian English throughout.
 - Do not use emojis.
 - Do not include implementation code — these are contracts, not test scripts.
