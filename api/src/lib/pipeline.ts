@@ -145,12 +145,17 @@ async function stepRunSpec(env: Bindings, message: PipelineMessage): Promise<voi
     });
 
     if (result.ok) {
+      // If spec was truncated, warn the user but still proceed (partial output is better than none)
+      const specText = result.wasTruncated
+        ? result.text + '\n\n---\n*Note: This specification was truncated due to length limits. Some sections may be incomplete.*'
+        : result.text;
+
       // Generate AI title (non-critical)
       let aiTitle: string | null = null;
       try {
         const titleResult = await callCompletion(
           apiKey,
-          [{ role: 'user', content: `Summarise what this software feature does in 5-8 words. Reply with ONLY the title, no quotes or punctuation at the end.\n\n${result.text.slice(0, 2000)}` }],
+          [{ role: 'user', content: `Summarise what this software feature does in 5-8 words. Reply with ONLY the title, no quotes or punctuation at the end.\n\n${specText.slice(0, 2000)}` }],
           'You are a concise technical writer. Respond with only the short title.',
           AGENT_CONFIGS.title.maxTokens,
           AGENT_CONFIGS.title.model,
@@ -171,7 +176,7 @@ async function stepRunSpec(env: Bindings, message: PipelineMessage): Promise<voi
           userId,
           apiKey,
           systemPrompt: getAlignmentReviewSystemPrompt(),
-          userPrompt: getSpecAlignmentUserPrompt(briefMarkdown, result.text),
+          userPrompt: getSpecAlignmentUserPrompt(briefMarkdown, specText),
           env,
           maxTokens: AGENT_CONFIGS.alignment_review.maxTokens,
           model: AGENT_CONFIGS.alignment_review.model,
@@ -184,12 +189,15 @@ async function stepRunSpec(env: Bindings, message: PipelineMessage): Promise<voi
       }
 
       const updateFields: Record<string, string | null> = {
-        spec_markdown: result.text,
+        spec_markdown: specText,
         status: 'spec_ready',
         spec_recommendation: specRecommendation,
       };
       if (aiTitle) {
         updateFields.title = aiTitle;
+      }
+      if (result.wasTruncated) {
+        updateFields.error_message = 'Specification output was truncated due to length limits. Some sections may be incomplete.';
       }
 
       const { error: saveError } = await serviceClient
@@ -243,6 +251,10 @@ async function stepRunPlan(env: Bindings, message: PipelineMessage): Promise<voi
     });
 
     if (result.ok) {
+      const planText = result.wasTruncated
+        ? result.text + '\n\n---\n*Note: This plan was truncated due to length limits. Some sections may be incomplete.*'
+        : result.text;
+
       let planRecommendation: string | null = null;
       try {
         const reviewResult = await runAgent({
@@ -251,7 +263,7 @@ async function stepRunPlan(env: Bindings, message: PipelineMessage): Promise<voi
           userId,
           apiKey,
           systemPrompt: getAlignmentReviewSystemPrompt(),
-          userPrompt: getPlanAlignmentUserPrompt(briefMarkdown, specMarkdown, result.text),
+          userPrompt: getPlanAlignmentUserPrompt(briefMarkdown, specMarkdown, planText),
           env,
           maxTokens: AGENT_CONFIGS.alignment_review.maxTokens,
           model: AGENT_CONFIGS.alignment_review.model,
@@ -263,9 +275,18 @@ async function stepRunPlan(env: Bindings, message: PipelineMessage): Promise<voi
         // Non-critical
       }
 
+      const updateFields: Record<string, string | null> = {
+        plan_markdown: planText,
+        plan_recommendation: planRecommendation,
+        status: 'plan_ready',
+      };
+      if (result.wasTruncated) {
+        updateFields.error_message = 'Plan output was truncated due to length limits. Some sections may be incomplete.';
+      }
+
       const { error: saveError } = await serviceClient
         .from('features')
-        .update({ plan_markdown: result.text, plan_recommendation: planRecommendation, status: 'plan_ready' })
+        .update(updateFields)
         .eq('id', featureId);
 
       if (saveError) {
@@ -315,6 +336,10 @@ async function stepRunTests(env: Bindings, message: PipelineMessage): Promise<vo
     });
 
     if (result.ok) {
+      const testsText = result.wasTruncated
+        ? result.text + '\n\n---\n*Note: These tests were truncated due to length limits. Some test cases may be incomplete.*'
+        : result.text;
+
       let testsRecommendation: string | null = null;
       try {
         const reviewResult = await runAgent({
@@ -323,7 +348,7 @@ async function stepRunTests(env: Bindings, message: PipelineMessage): Promise<vo
           userId,
           apiKey,
           systemPrompt: getAlignmentReviewSystemPrompt(),
-          userPrompt: getTestsAlignmentUserPrompt(briefMarkdown, specMarkdown, planMarkdown, result.text),
+          userPrompt: getTestsAlignmentUserPrompt(briefMarkdown, specMarkdown, planMarkdown, testsText),
           env,
           maxTokens: AGENT_CONFIGS.alignment_review.maxTokens,
           model: AGENT_CONFIGS.alignment_review.model,
@@ -335,9 +360,18 @@ async function stepRunTests(env: Bindings, message: PipelineMessage): Promise<vo
         // Non-critical
       }
 
+      const updateFields: Record<string, string | null> = {
+        tests_markdown: testsText,
+        tests_recommendation: testsRecommendation,
+        status: 'tests_ready',
+      };
+      if (result.wasTruncated) {
+        updateFields.error_message = 'Tests output was truncated due to length limits. Some test cases may be incomplete.';
+      }
+
       const { error: saveError } = await serviceClient
         .from('features')
-        .update({ tests_markdown: result.text, tests_recommendation: testsRecommendation, status: 'tests_ready' })
+        .update(updateFields)
         .eq('id', featureId);
 
       if (saveError) {
@@ -488,13 +522,22 @@ async function stepRunSecurityReview(env: Bindings, message: PipelineMessage): P
     });
 
     if (securityResult.ok) {
+      // If truncated, the VERDICT line is likely missing — append explicit FAIL with explanation
+      const securityText = securityResult.wasTruncated
+        ? securityResult.text + '\n\n---\n*Review was truncated due to length limits.*\n\nVERDICT: FAIL'
+        : securityResult.text;
+
       const { error: secSaveError } = await serviceClient
         .from('features')
-        .update({ security_review_markdown: securityResult.text })
+        .update({ security_review_markdown: securityText })
         .eq('id', featureId);
 
       if (secSaveError) {
         logger.error({ event: 'agent.security_review.save', actor: userId, outcome: 'failure', metadata: { featureId, error: secSaveError.message } });
+      }
+
+      if (securityResult.wasTruncated) {
+        logger.warn({ event: 'agent.security_review.truncated_verdict', actor: userId, outcome: 'success', metadata: { featureId } });
       }
     }
 
@@ -559,13 +602,22 @@ async function stepRunCodeReview(env: Bindings, message: PipelineMessage): Promi
     });
 
     if (codeReviewResult.ok) {
+      // If truncated, the VERDICT line is likely missing — append explicit FAIL with explanation
+      const codeReviewText = codeReviewResult.wasTruncated
+        ? codeReviewResult.text + '\n\n---\n*Review was truncated due to length limits.*\n\nVERDICT: FAIL'
+        : codeReviewResult.text;
+
       const { error: crSaveError } = await serviceClient
         .from('features')
-        .update({ code_review_markdown: codeReviewResult.text })
+        .update({ code_review_markdown: codeReviewText })
         .eq('id', featureId);
 
       if (crSaveError) {
         logger.error({ event: 'agent.code_review.save', actor: userId, outcome: 'failure', metadata: { featureId, error: crSaveError.message } });
+      }
+
+      if (codeReviewResult.wasTruncated) {
+        logger.warn({ event: 'agent.code_review.truncated_verdict', actor: userId, outcome: 'success', metadata: { featureId } });
       }
     }
 
