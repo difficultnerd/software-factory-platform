@@ -15,7 +15,7 @@ export const AGENT_CONFIGS: Record<AgentName, AgentConfig> = {
   spec:             { model: 'claude-sonnet-4-5-20250929', maxTokens: 32000 },
   planner:          { model: 'claude-sonnet-4-5-20250929', maxTokens: 32000 },
   contract_test:    { model: 'claude-sonnet-4-5-20250929', maxTokens: 32000 },
-  implementer:      { model: 'claude-opus-4-6-20250910',  maxTokens: 128000 },
+  implementer:      { model: 'claude-opus-4-6',  maxTokens: 128000 },
   security_review:  { model: 'claude-sonnet-4-5-20250929', maxTokens: 16000 },
   code_review:      { model: 'claude-sonnet-4-5-20250929', maxTokens: 16000 },
   alignment_review: { model: 'claude-haiku-4-5-20251001',  maxTokens: 500 },
