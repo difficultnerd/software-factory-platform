@@ -86,8 +86,9 @@ export async function callCompletion(
         return { ok: false, error: event.message };
       }
     }
-  } catch {
-    return { ok: false, error: 'Failed to connect to AI service' };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : 'Unknown error';
+    return { ok: false, error: `Failed to connect to AI service: ${detail}` };
   }
 
   if (!text) {
@@ -132,22 +133,23 @@ export async function* streamChatCompletion(
   });
 
   if (!response.ok) {
-    let errorMessage = 'Failed to connect to AI service';
+    let errorMessage = `AI service error (HTTP ${response.status})`;
     try {
       const body = await response.text();
-      const parsed = JSON.parse(body) as { error?: { message?: string } };
+      const parsed = JSON.parse(body) as { error?: { message?: string; type?: string } };
       if (parsed.error?.message) {
-        // Sanitise: don't leak internal Anthropic details, but keep useful info
         if (response.status === 401) {
           errorMessage = 'Invalid API key. Please check your key in Settings.';
         } else if (response.status === 429 || response.status === 529) {
           errorMessage = 'The AI service is temporarily busy. Please try again in a few minutes.';
         } else if (response.status === 400) {
-          errorMessage = 'Request error. Please try again with a shorter message.';
+          errorMessage = `Request error: ${parsed.error.message}`;
+        } else {
+          errorMessage = `AI service error (HTTP ${response.status}): ${parsed.error.message}`;
         }
       }
     } catch {
-      // Could not parse error body; use generic message
+      // Could not parse error body; keep status-code message
     }
     yield { type: 'error', message: errorMessage };
     return;
@@ -278,21 +280,23 @@ export async function callToolCompletion(
   });
 
   if (!response.ok) {
-    let errorMessage = 'Failed to connect to AI service';
+    let errorMessage = `AI service error (HTTP ${response.status})`;
     try {
       const body = await response.text();
-      const parsed = JSON.parse(body) as { error?: { message?: string } };
+      const parsed = JSON.parse(body) as { error?: { message?: string; type?: string } };
       if (parsed.error?.message) {
         if (response.status === 401) {
           errorMessage = 'Invalid API key. Please check your key in Settings.';
         } else if (response.status === 429 || response.status === 529) {
           errorMessage = 'The AI service is temporarily busy. Please try again in a few minutes.';
         } else if (response.status === 400) {
-          errorMessage = 'Request error. Please try again with a shorter message.';
+          errorMessage = `Request error: ${parsed.error.message}`;
+        } else {
+          errorMessage = `AI service error (HTTP ${response.status}): ${parsed.error.message}`;
         }
       }
     } catch {
-      // Could not parse error body; use generic message
+      // Could not parse error body; keep status-code message
     }
     return { ok: false, error: errorMessage };
   }
