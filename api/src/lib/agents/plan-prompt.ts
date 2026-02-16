@@ -64,6 +64,7 @@ List all database migrations needed:
 - Order steps so that each builds on the previous. No step should depend on a later step.
 - Be specific about file paths and function names where possible.
 - Keep steps small and independently verifiable.
+- **Be concise.** Each step's description should be 2-3 sentences max. Use bullet lists, not paragraphs. List file paths and key function signatures only — the implementer will fill in details. The entire plan should be under 3000 words.
 - Use Australian English throughout.
 - Do not use emojis.
 - Ensure every requirement from the specification is covered by at least one step.

@@ -22,7 +22,7 @@ interface RunAgentParams {
 }
 
 type RunAgentResult =
-  | { ok: true; text: string; inputTokens: number; outputTokens: number; stopReason: string }
+  | { ok: true; text: string; inputTokens: number; outputTokens: number; stopReason: string; wasTruncated: boolean }
   | { ok: false; error: string };
 
 export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> {
@@ -46,38 +46,18 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
   const serviceClient = createServiceClient(env);
 
   if (result.ok) {
-    // Detect truncation — treat as failure so pipeline can retry
-    if (result.stopReason === 'max_tokens') {
-      logger.error({
+    const wasTruncated = result.stopReason === 'max_tokens';
+
+    if (wasTruncated) {
+      logger.warn({
         event: `agent.${agentName}.truncated`,
         actor: userId,
-        outcome: 'failure',
+        outcome: 'success',
         metadata: { featureId, outputTokens: result.outputTokens },
       });
-
-      const { error: insertError } = await serviceClient.from('agent_runs').insert({
-        feature_id: featureId,
-        user_id: userId,
-        agent_name: agentName,
-        status: 'failed',
-        error_message: 'Output truncated',
-        input_tokens: result.inputTokens,
-        output_tokens: result.outputTokens,
-      });
-
-      if (insertError) {
-        logger.error({
-          event: `agent.${agentName}.log_run`,
-          actor: userId,
-          outcome: 'failure',
-          metadata: { featureId, error: insertError.message },
-        });
-      }
-
-      return { ok: false, error: 'Agent output was truncated. The response exceeded the maximum length.' };
     }
 
-    // Log successful agent run
+    // Log agent run (truncated output is still usable for text agents)
     const { error: insertError } = await serviceClient.from('agent_runs').insert({
       feature_id: featureId,
       user_id: userId,
@@ -85,6 +65,7 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       status: 'success',
       input_tokens: result.inputTokens,
       output_tokens: result.outputTokens,
+      ...(wasTruncated ? { error_message: 'Output was truncated but salvaged' } : {}),
     });
 
     if (insertError) {
@@ -104,10 +85,11 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
         featureId,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
+        wasTruncated,
       },
     });
 
-    return result;
+    return { ...result, wasTruncated };
   }
 
   // Log failed agent run

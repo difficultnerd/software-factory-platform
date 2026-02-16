@@ -109,13 +109,19 @@ export async function* streamChatCompletion(
   maxTokens: number = 4096,
   model: string = 'claude-sonnet-4-5-20250929',
 ): AsyncGenerator<StreamEvent> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+  };
+  // Enable extended output for Sonnet/Opus when requesting >8192 tokens
+  if (maxTokens > 8192 && !model.includes('haiku')) {
+    headers['anthropic-beta'] = 'output-128k-2025-02-19';
+  }
+
   const response = await fetchWithRetry('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
+    headers,
     body: JSON.stringify({
       model,
       max_tokens: maxTokens,

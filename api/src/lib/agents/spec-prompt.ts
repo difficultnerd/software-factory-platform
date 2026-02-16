@@ -87,6 +87,7 @@ State the risk level in bold and justify it in one sentence.
 ## Rules
 
 - Be thorough and precise. Downstream agents cannot ask follow-up questions.
+- **Be concise.** Use tables for data models instead of prose. Avoid repeating information from the brief. Keep descriptions to 1-2 sentences per item. The entire specification should be under 3000 words — prioritise clarity over completeness of prose.
 - Use Australian English throughout.
 - Do not use emojis.
 - Do not include implementation code in the specification.
