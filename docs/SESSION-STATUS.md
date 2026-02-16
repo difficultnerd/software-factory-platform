@@ -1,4 +1,4 @@
-# Session Status — 15 Feb 2026
+# Session Status — 16 Feb 2026
 
 ## Completed
 
@@ -23,39 +23,45 @@
 ### Session 2c: Pipeline Orchestration
 - Agent runner service (`api/src/lib/agents/runner.ts`) — calls Anthropic, logs `agent_runs`
 - Spec agent + plan agent with constrained prompts
-- State machine: `drafting -> spec_generating -> spec_ready -> plan_generating -> plan_ready -> plan_approved`
-- Status polling (3s interval) on detail page during `_generating` states
-- Approve spec / approve plan UI on feature detail page
+- State machine: full 14-status pipeline from `drafting` through `done`/`failed`
+- Status polling on detail page during `_generating` states
+- Approve spec / approve plan / approve tests UI on feature detail page
 - Streaming internally to avoid Cloudflare 524 timeouts
 
-### Post-2c Polish (just shipped)
+### Session 2d: Code Output + Reviews
+- R2 storage integration — `ARTIFACTS` binding in `wrangler.toml`
+- Contract test agent (`test-prompt.ts`)
+- Implementer agent (`code-prompt.ts` + `code-runner.ts`) — tool-use with `write_files`, Zod validation, retry loop, truncation salvage
+- Security review agent (`security-review-prompt.ts`) — OWASP ASVS L2 + ISM checklist
+- Code review agent (`code-review-prompt.ts`)
+- Alignment review agent (`alignment-review-prompt.ts`) — APPROVE/REVISE at each gate
+- Agent config (`agent-config.ts`) — model selection per agent type
+- Artifact storage in R2, metadata in `artifacts` table
+- Download as zip endpoint (`GET /api/features/:id/download`) using `fflate`
+- Feature detail page: markdown rendering via `marked`, download button, recommendation banners
+- Verdict step: both security + code review must PASS to reach `done`
+
+### Session 2e: Queue Migration + Reliability
+- Migrated agent execution from inline HTTP handlers to Cloudflare Queues
+- Queue producer/consumer pattern (`PIPELINE_QUEUE` binding, `pipeline.ts` consumer)
+- Dead letter queue (`pipeline-dlq`) for failed messages
+- Direct Anthropic API HTTP wrapper (`anthropic.ts`) — no SDK dependency
+- Agent truncation handling and salvage improvements
+- Stuck recovery cron (every 15 min) as safety net
+
+### Post-Session Polish
 - DELETE `/api/features/:id` — cascade deletes chat_messages, agent_runs, artifacts
 - PATCH `/api/features/:id` — rename feature title (Zod validated, max 200 chars)
 - AI-generated title after spec agent completes (quick 50-token summarisation call)
 - Dashboard: inline title editing (Enter to save, Escape to cancel) + delete with confirmation
 - Feature detail page: delete button in header with confirmation, redirects to dashboard
+- Retry endpoint (`POST /api/features/:id/retry`) — rolls back to last checkpoint
+- Revise endpoint (`POST /api/features/:id/revise`) — clears downstream, restarts from spec
+- BA chat at approval gates — prompt augmented with pipeline context
 
-## Next Up: Session 2d — Code Output
+## Current State
 
-### What needs building
-1. **R2 storage integration** — configure Cloudflare R2 bucket binding in `wrangler.toml`
-2. **Code generation agent(s)** — port remaining agents from `github.com/difficultnerd/software-factory-template/.github/scripts/`
-3. **Artifact storage** — save generated files to R2, record metadata in `artifacts` table
-4. **Download as zip endpoint** — `GET /api/features/:id/download` — stream zip from R2 artifacts
-5. **Feature detail page** — render spec/plan markdown properly (currently `whitespace-pre-wrap` plain text), add download button when artifacts exist
-6. **Status badges on feature list** — already partially done (status labels + colours exist)
-
-### Key files likely involved
-- `api/wrangler.toml` — add R2 bucket binding
-- `api/src/types.ts` — add R2 binding to `Bindings` interface
-- `api/src/routes/features.ts` — add download endpoint, wire up code gen agents
-- `api/src/lib/agents/` — new agent prompts (code, test, security review)
-- `web/src/routes/app/features/[id]/+page.svelte` — markdown rendering, download button
-
-### Decisions to make
-- Which code gen agents to port first (all 4 remaining, or just the code agent?)
-- Markdown rendering library for spec/plan display (e.g. `marked`, `mdsvex`, or keep plain text)
-- Zip generation approach (stream from R2 on-the-fly vs pre-build)
+The full pipeline is operational end-to-end: users can describe software, approve spec/plan/tests at each gate, generate code via tool-use, receive automated security + code reviews, and download the result as a zip.
 
 ## Architecture Reference
 
@@ -64,5 +70,7 @@
 - **DB**: Supabase PostgreSQL, RLS on all tables
 - **Auth**: Supabase Auth, JWKS JWT, `@supabase/ssr` cookies
 - **Secrets**: Supabase Vault (service-role only helper functions)
-- **AI**: Anthropic Claude Sonnet via user BYOK keys
+- **AI**: Anthropic Claude (Sonnet 4.5 for most agents, Opus 4.6 for implementer, Haiku 4.5 for lightweight tasks) via user BYOK keys
+- **Pipeline**: Cloudflare Queues (async), stuck-recovery cron (every 15 min)
+- **Storage**: Cloudflare R2 (`buildpractical-artifacts` bucket)
 - **Deploy**: GitHub Actions on push to `main`, auto-deploys both API and web

@@ -69,20 +69,20 @@ Files in `api/src/middleware/` are the security trust root. Do NOT modify withou
 The feature pipeline is a state machine managed in the `features` table:
 
 ```
-drafting -> spec_generating -> spec_ready -> (user approves) ->
-plan_generating -> plan_ready -> (user approves) ->
-tests_generating -> tests_ready -> (user approves) ->
+drafting -> (user confirms brief)
+spec_generating -> spec_ready -> (user approves) -> spec_approved ->
+plan_generating -> plan_ready -> (user approves) -> plan_approved ->
+tests_generating -> tests_ready -> (user approves) -> tests_approved ->
 implementing -> review -> done / failed
 ```
 
 At each `*_ready` gate, an alignment reviewer runs automatically and produces an APPROVE/REVISE recommendation displayed to the user. Users can approve regardless of the recommendation.
 
-Each agent phase follows the same pattern (see `api/src/routes/features.ts`):
-1. Read user's API key from Vault via service client RPC
-2. Call `runAgent()` with the agent's system/user prompts
-3. On success: run alignment reviewer (non-critical), store output + recommendation, transition to next status
-4. On failure: set status to `failed` with error message
-5. Always check `{ error }` from Supabase updates — if save fails, transition to `failed`
+Agent execution is fully asynchronous via **Cloudflare Queues**:
+- Route handlers enqueue pipeline messages (e.g. `run_spec`, `run_plan`)
+- Queue consumer (`api/src/lib/pipeline.ts`) processes steps one at a time
+- Each step: read inputs from DB -> run agent -> save output -> enqueue next step
+- Max batch size: 1, max retries: 2, dead letter queue: `pipeline-dlq`
 
 ### Agent Prompts (`api/src/lib/agents/`)
 
@@ -94,7 +94,17 @@ Each agent phase follows the same pattern (see `api/src/routes/features.ts`):
 - `security-review-prompt.ts` — Security review (OWASP ASVS L2 + ISM checklist, outputs `VERDICT: PASS/FAIL`)
 - `code-review-prompt.ts` — Code review (outputs `VERDICT: PASS/FAIL`)
 - `alignment-review-prompt.ts` — Alignment reviewer (outputs `VERDICT: APPROVE/REVISE`)
-- `runner.ts` — Generic agent runner (calls Anthropic, logs `agent_runs`)
+- `runner.ts` — Generic agent runner (calls Anthropic API, logs `agent_runs`)
+- `agent-config.ts` — Model selection and token limits per agent type
+
+### Other API Libraries (`api/src/lib/`)
+
+- `anthropic.ts` — Direct Anthropic API HTTP wrapper (no SDK)
+- `ba-prompt.ts` — BA agent system prompt (used by chat route)
+- `pipeline.ts` — Queue consumer: processes pipeline steps asynchronously
+- `stuck-recovery.ts` — Cron job: auto-fails features stuck in processing states for >10 min
+- `supabase.ts` — Supabase client factories (authenticated + service)
+- `logger.ts` — Structured JSON logging
 
 ### Recovery Mechanisms
 
@@ -103,9 +113,9 @@ Each agent phase follows the same pattern (see `api/src/routes/features.ts`):
 - **Chat at gates**: BA chat is allowed at `drafting`, `spec_ready`, `plan_ready`, `tests_ready` — BA prompt is augmented with pipeline context at approval gates
 - **Stuck recovery** (`api/src/lib/stuck-recovery.ts`): Scheduled worker runs every 15 min, auto-fails features stuck in processing states for >10 min
 
-### Known Architectural Debt
+### Architectural Notes
 
-Agents run **inline in HTTP request handlers**. The Anthropic streaming wrapper avoids Cloudflare 524 timeouts, but the pattern is fragile — the stuck-recovery cron is a safety net. Future improvement: move to Cloudflare Queues.
+Agents run asynchronously via Cloudflare Queues, avoiding Cloudflare 524 timeouts. The stuck-recovery cron (every 15 min) is a safety net for any steps that fail silently.
 
 ## API Routes
 
@@ -119,6 +129,11 @@ Agents run **inline in HTTP request handlers**. The Anthropic streaming wrapper 
 - `web/src/routes/app/features/+page.svelte` — Chat interface for BA agent (also handles revise brief flow)
 - `web/src/routes/app/features/[id]/+page.svelte` — Feature detail (pipeline breadcrumb, recommendation banners, approve/retry/discuss buttons, markdown rendering, download)
 - `web/src/routes/app/settings/+page.svelte` — API key management
+
+### Frontend Libraries (`web/src/lib/`)
+
+- `api.ts` — Typed fetch wrapper for API calls
+- `sse.ts` — SSE parser for streaming responses
 
 ## Database Schema
 
@@ -136,12 +151,16 @@ Defined in `supabase/migrations/`. Key tables:
 API (`api/.dev.vars`):
 - `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `ALLOWED_ORIGIN`
 
+Cloudflare bindings (configured in `api/wrangler.toml`):
+- `ARTIFACTS` — R2 bucket binding (`buildpractical-artifacts`)
+- `PIPELINE_QUEUE` — Queue producer binding (`pipeline-queue`)
+
 Web (`web/.env`):
 - `PUBLIC_SUPABASE_URL`, `PUBLIC_SUPABASE_ANON_KEY`, `PUBLIC_API_URL`
 
 ## Deployment
 
-Automatic via GitHub Actions on push to main. API deploys to Cloudflare Workers (with R2 binding and cron trigger), web deploys to Cloudflare Pages. Push directly to main (no branch protection yet).
+Automatic via GitHub Actions on push to main. API deploys to Cloudflare Workers (with R2 binding, Queue binding, and cron trigger), web deploys to Cloudflare Pages. Push directly to main (no branch protection yet).
 
 R2 bucket (`buildpractical-artifacts`) must exist in the Cloudflare account. The Cloudflare API token needs **Workers R2 Storage: Edit** permission.
 
