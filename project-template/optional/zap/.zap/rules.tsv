@@ -1,0 +1,5 @@
+# rule id<TAB>action (IGNORE|WARN|FAIL)<TAB>comment
+10020	FAIL	Anti-clickjacking header missing
+10038	FAIL	Content Security Policy header not set
+10021	FAIL	X-Content-Type-Options header missing
+10054	WARN	Cookie without SameSite attribute

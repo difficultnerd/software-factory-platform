@@ -1,0 +1,20 @@
+# Flags logging of sensitive values. Tune the name list to your domain.
+rules:
+  - id: rust-log-sensitive-field
+    languages: [generic]
+    paths: { include: ["*.rs"] }
+    severity: ERROR
+    message: 'Sensitive field name in a log macro. Log an opaque ID instead.'
+    pattern-regex: '(?i)\b(tracing::|log::)?(trace|debug|info|warn|error|println|eprintln|dbg)!\s*\([^;]*\b(password|passwd|secret|token|api_key|apikey|authorization|bearer|email_body|email_content|message_body|subject|refresh_token|access_token|session_id)\b'
+  - id: dart-log-sensitive-field
+    languages: [generic]
+    paths: { include: ["*.dart"] }
+    severity: ERROR
+    message: 'Sensitive field name in a print/log call. Log an opaque ID instead.'
+    pattern-regex: '(?i)\b(print|debugPrint|log|logger\.\w+)\s*\([^;]*\b(password|secret|token|apiKey|authorization|bearer|emailBody|emailContent|messageBody|subject|refreshToken|accessToken|sessionId)\b'
+  - id: rust-derive-debug-on-sensitive-struct
+    languages: [generic]
+    paths: { include: ["*.rs"] }
+    severity: WARNING
+    message: 'derive(Debug) on a struct holding sensitive fields leaks them via {:?}. Implement Debug by hand and redact.'
+    pattern-regex: '(?is)#\[derive\([^)]*Debug[^)]*\)\]\s*(pub\s+)?struct\s+\w+\s*\{[^}]*\b(password|token|secret|api_key|email_body|body)\s*:'

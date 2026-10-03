@@ -1,0 +1,21 @@
+# Rust
+target/
+# Dart / Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+.pub-cache/
+# Python tooling
+__pycache__/
+.venv/
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

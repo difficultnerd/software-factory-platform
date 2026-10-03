@@ -1,0 +1,7 @@
+# Extends the built-in Gitleaks ruleset. Add allowlists here, never disable rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-safe paths"
+paths = ['''(^|/)\.env\.example$''', '''(^|/)Cargo\.lock$''', '''(^|/)pubspec\.lock$''']

@@ -1,0 +1,12 @@
+# Project-local Semgrep rules. Registry rule packs are added in CI.
+rules:
+  - id: dart-insecure-http-url
+    languages: [dart]
+    severity: WARNING
+    message: Plain http:// URL; use https:// for anything beyond localhost.
+    pattern-regex: Uri\.parse\(\s*['"]http://(?!localhost|127\.0\.0\.1|10\.0\.2\.2)
+  - id: rust-unsafe-block
+    languages: [rust]
+    severity: WARNING
+    message: unsafe block; justify in a comment or remove.
+    pattern: unsafe { ... }
