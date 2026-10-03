@@ -1,0 +1,35 @@
+name: ZAP DAST
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1"
+
+permissions:
+  contents: read
+  issues: write # baseline action files a summary issue
+
+# Set repository variable ZAP_TARGET_URL to a STAGING deployment you own.
+# Never point this at production or a third party.
+jobs:
+  zap-baseline:
+    runs-on: ubuntu-latest
+    if: vars.ZAP_TARGET_URL != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: zaproxy/action-baseline@v0.14.0
+        with:
+          target: ${{ vars.ZAP_TARGET_URL }}
+          rules_file_name: .zap/rules.tsv
+          fail_action: true
+  # Uncomment for an API with an OpenAPI spec (ZAP_OPENAPI_URL variable).
+  # zap-api:
+  #   runs-on: ubuntu-latest
+  #   if: vars.ZAP_OPENAPI_URL != ''
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: zaproxy/action-api-scan@v0.9.0
+  #       with:
+  #         target: ${{ vars.ZAP_OPENAPI_URL }}
+  #         format: openapi
+  #         rules_file_name: .zap/rules.tsv

@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /backend
+    schedule: { interval: weekly }
+    groups:
+      rust-minor-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: pub
+    directory: /frontend
+    schedule: { interval: weekly }
+    groups:
+      dart-minor-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule: { interval: weekly }

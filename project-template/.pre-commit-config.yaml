@@ -1,0 +1,58 @@
+# Install once per clone:  pip install pre-commit && pre-commit install
+default_install_hook_types: [pre-commit, pre-push]
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      # Fast checks, run on every commit.
+      - id: rustfmt
+        name: rustfmt
+        entry: cargo fmt --manifest-path backend/Cargo.toml --all -- --check
+        language: system
+        files: ^backend/.*\.rs$
+        pass_filenames: false
+      - id: dart-format
+        name: dart format
+        entry: dart format --output=none --set-exit-if-changed frontend
+        language: system
+        files: ^frontend/.*\.dart$
+        pass_filenames: false
+      - id: python-scope
+        name: python only in tools/ and scripts/
+        entry: python3 scripts/check_python_scope.py
+        language: system
+        always_run: true
+        pass_filenames: false
+
+      # Slower checks, run before push.
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --manifest-path backend/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: ^backend/
+        pass_filenames: false
+        stages: [pre-push]
+      - id: dart-analyze
+        name: dart analyze
+        entry: bash -c 'cd frontend && dart analyze --fatal-infos'
+        language: system
+        files: ^frontend/
+        pass_filenames: false
+        stages: [pre-push]
